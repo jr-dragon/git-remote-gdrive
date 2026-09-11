@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 
@@ -17,9 +18,13 @@ const directoryKey = "gdrive-repo"
 const manifestKey = "gdrive-manifest"
 
 type Store struct {
-	Client    *Client
-	Root      string
-	directory string
+	Client                    *Client
+	Root                      string
+	directory                 string
+	archiveDirectories        map[string]string
+	checkedArchiveDirectories map[string]bool
+	loaded                    bool
+	version                   string
 }
 
 func (s *Store) root(ctx context.Context) (file, error) {
@@ -44,6 +49,9 @@ func (s *Store) Load(ctx context.Context) (*repository.Manifest, string, error) 
 	dir, version := root.value(directoryKey), root.value(manifestKey)
 	if dir == "" && version == "" {
 		s.directory = ""
+		s.archiveDirectories = nil
+		s.checkedArchiveDirectories = nil
+		s.loaded, s.version = true, ""
 		return repository.Empty(), "", nil
 	}
 	if !repository.ValidID(dir) || !repository.ValidID(version) {
@@ -74,7 +82,61 @@ func (s *Store) Load(ctx context.Context) (*repository.Manifest, string, error) 
 	if err := m.Validate(); err != nil {
 		return nil, "", err
 	}
+	s.archiveDirectories = maps.Clone(m.ArchiveDirectories)
+	s.checkedArchiveDirectories = nil
+	s.loaded, s.version = true, version
 	return &m, version, nil
+}
+
+// Archive directories are identified by the published manifest, not by name.
+// A conflicting first writer can leave an unused candidate, just like repository
+// initialization; only the winning manifest's directory IDs become canonical.
+func (s *Store) UploadArchive(ctx context.Context, kind, name string, reader io.ReadSeeker, size int64) (string, error) {
+	if kind != "branch" && kind != "tags" {
+		return "", errors.New("invalid archive directory kind")
+	}
+	if s.archiveDirectories == nil {
+		s.archiveDirectories = make(map[string]string)
+	}
+	if s.checkedArchiveDirectories == nil {
+		s.checkedArchiveDirectories = make(map[string]bool)
+	}
+	dir := s.archiveDirectories[kind]
+	if dir == "" {
+		var err error
+		dir, err = s.Client.createNamedFolder(ctx, s.Root, kind)
+		if err != nil {
+			return "", err
+		}
+		s.archiveDirectories[kind] = dir
+		s.checkedArchiveDirectories[kind] = true
+	}
+	if !s.checkedArchiveDirectories[kind] {
+		meta, err := s.Client.metadata(ctx, dir)
+		if err != nil {
+			return "", err
+		}
+		if !meta.in(s.Root) || meta.MIME != folderMIME || meta.Title != kind || meta.value("gdrive-format") != "1" {
+			return "", errors.New("invalid archive directory on Drive")
+		}
+		s.checkedArchiveDirectories[kind] = true
+	}
+	existing, err := s.Client.findArchive(ctx, dir, name)
+	if err != nil {
+		return "", err
+	}
+	// Reject an already-stale push before overwriting a mutable convenience ZIP.
+	// Refs have already been published; ZIP metadata uses a separate CAS later.
+	if s.loaded {
+		root, err := s.root(ctx)
+		if err != nil {
+			return "", err
+		}
+		if root.value(manifestKey) != s.version {
+			return "", repository.ErrConflict
+		}
+	}
+	return s.Client.uploadFile(ctx, existing, dir, name, reader, size)
 }
 
 func (s *Store) ensureDirectory(ctx context.Context) error {
@@ -125,6 +187,7 @@ func (s *Store) Publish(ctx context.Context, expected string, m *repository.Mani
 		return err
 	}
 	m.Root, m.Directory = s.Root, s.directory
+	m.ArchiveDirectories = maps.Clone(s.archiveDirectories)
 	if err := m.Validate(); err != nil {
 		return err
 	}

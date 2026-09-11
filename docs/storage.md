@@ -19,6 +19,14 @@ have permission to access the file; they do not grant access to Drive contents.
 The directory must be a direct child of the selected root. Manifest and pack
 files must be direct children of that directory.
 
+Optional `archive_directories` in the manifest maps `branch` and `tags` to their
+Drive folder IDs. These named folders are direct children of the selected root,
+separate from `@.git-remote-gdrive`, and carry PUBLIC property `gdrive-format=1`.
+They are created lazily and identified by ID on later pushes. Existing unrelated
+folders with those names are not adopted. Concurrent/failed first archive uploads
+can leave candidate folders; the successfully published manifest selects the
+canonical IDs just as it does for repository initialization.
+
 Drive file names are not unique. Multiple candidate directories can exist after
 concurrent initialization, and multiple `manifest.json` snapshots normally exist.
 The root pointers select exactly one repository and one current manifest. A client
@@ -42,6 +50,18 @@ missing: doing so could select unrelated or unpublished data.
   "peeled": {
     "refs/tags/v1": "0123456789abcdef0123456789abcdef01234567"
   },
+  "archive_directories": {
+    "branch": "BRANCH_DIRECTORY_ID",
+    "tags": "TAG_DIRECTORY_ID"
+  },
+  "archives": {
+    "refs/heads/main": {
+      "id": "ZIP_FILE_ID",
+      "oid": "0123456789abcdef0123456789abcdef01234567",
+      "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "size": 2048
+    }
+  },
   "packs": [
     {
       "id": "PACK_FILE_ID",
@@ -59,6 +79,68 @@ to object IDs. `peeled` contains the fully dereferenced object ID of annotated
 tags. `head` is always a branch ref name; it can be unborn if no branches exist.
 List advertises HEAD only when its target exists. Unknown format versions and
 invalid refs, pack descriptors, or repository bindings fail before import.
+
+`archives` and `archive_directories` are optional additions to v1. Older manifests
+remain readable without them. `archives` maps a full branch/tag ref to its current
+ZIP ID, ref object ID, size, and digest. Its `oid` must equal the corresponding
+entry in `refs`; directory IDs must be distinct from the repository root, storage
+directory, and each other. Legacy writers do not preserve these fields, so use
+updated helpers for pushes once ZIP snapshots are needed.
+
+## Branch and tag ZIP snapshots
+
+Only after successfully publishing the push's refs, generate a ZIP on local
+temporary disk for each non-deletion branch/tag update using its exact published
+object ID. Branches and tree/commit tags use
+`git archive --format=zip <oid>`; annotated tags are dereferenced by Git. Tags
+pointing to blobs use a ZIP containing one `blob` entry. The working tree is not
+archived. Standard Git archive attributes apply, and submodule contents are not
+recursively downloaded. The temporary file is removed on completion or failure.
+
+ZIPs have MIME type `application/zip`. Names are
+`<percent-encoded-short-ref>.zip`, stored under `branch/` for
+`refs/heads/*` and `tags/` for `refs/tags/*`. Encoding `/` and `%` distinguishes
+`feature/a`, `feature%2Fa`, and `feature-a`. The full destination ref, not a local
+source branch name, determines the location. Other ref namespaces have no ZIP.
+Search the canonical folder for a non-trashed file with that exact name, including
+all result pages. If it exists, use Drive `files.update` with its ID to overwrite
+its content through a resumable upload; otherwise create a file. Do not delete and
+recreate matching files. Incomplete searches and duplicate matching names fail
+instead of choosing an arbitrary file. A same-name folder or native Google
+document is not a writable ZIP target.
+
+Uploads reuse the resumable transport. Ref publication removes stale ZIP mappings
+for changed/deleted refs; unchanged mappings are preserved. After successful ZIP
+uploads, a second conditional manifest publication records their file IDs, object
+IDs, digests, and directories without changing the newly published refs. Dry-run
+performs no ZIP uploads. An existing mapping for the same ref/object ID can be reused.
+An up-to-date Git push may send no update commands, so it does not backfill ZIPs.
+Deletion removes the manifest mapping without deleting the last ZIP. Recreating
+the ref therefore finds and overwrites the existing file even without a manifest
+entry. Files produced by the earlier versioned naming scheme are not deleted;
+the next update creates/overwrites the fixed filename.
+
+A ZIP adds a complete file snapshot per updated ref, independently of pack
+incrementality/compaction. Updates keep the same file ID rather than accumulating
+new ZIP files for every commit. Drive may retain file revisions according to its
+normal retention policy; the helper does not pin them.
+
+ZIPs are mutable convenience exports. Once refs have committed, ZIP generation,
+upload, or metadata failures emit warnings on stderr while the helper still reports
+`ok` for the successful Git ref updates. No rollback is attempted. Other ZIPs in
+the batch may still succeed. Failed ref publication does not start ZIP export.
+An up-to-date push does not automatically repair a failed export; a later update
+of the ref triggers another attempt.
+
+The export phase reloads the latest manifest and skips any target ref whose object
+ID has already changed again. Before overwriting, it checks the root manifest
+version and passes the ZIP ETag when initiating the update; a missing ETag fails
+the export. ZIP metadata is saved with a separate CAS, preserving the refs from
+the reloaded snapshot. Concurrent changes cause a warning, never restoration of
+older refs. An upload already in progress can still race a later push, since this
+is not a multi-file transaction. A missing archive entry means no confirmed export
+for the current ref; a recorded digest can detect changed ZIP bytes. Packs and
+manifests remain authoritative for Git clone/fetch regardless of export failures.
 
 ## Git transport
 
@@ -99,25 +181,33 @@ reader-retention/recovery design and is deliberately not performed by pushes.
 1. Read the root pointer and save the manifest ID as the expected version.
 2. Load the immutable manifest and hydrate its packs locally as needed.
 3. Validate the entire push batch. Dry-run stops before remote writes.
-4. If uninitialized, create a candidate storage directory using a generated ID.
-5. Upload the new pack, if any, and an immutable manifest with generated IDs.
+4. Remove stale archive mappings for changed/deleted refs, preserving unchanged
+   mappings. If uninitialized, create a candidate storage directory.
+5. Upload the new pack, if any, and the immutable ref manifest with generated IDs.
 6. Read the root again. If its current pointer differs from the expected version,
    reject the push. Preserve unrelated custom properties.
 7. Patch both root pointers with `If-Match: <current root ETag>` using Drive v2
    metadata. HTTP 412 is a concurrent-write conflict; no unconditional fallback
    is allowed. Missing ETags reject the write.
-8. Report success only after publication. If the response was lost, reread the
+8. Confirm ref publication. If the response was lost, reread the
    pointer: observing this attempt's unique manifest ID confirms its publication.
    Otherwise report conflict/uncertain failure and instruct the user to fetch.
+9. Reload current refs and generate/upload ZIPs for still-current pushed targets,
+   creating candidate archive directories if needed. Record IDs, hashes, and sizes.
+10. Conditionally publish a new manifest for successful ZIP metadata, without
+    restoring or changing refs. Export or metadata failures warn on stderr; the
+    already-committed ref updates are still reported as successful to Git.
 
 Concurrent initialization follows the same protocol. Two candidates may be
 uploaded, but only one root update can succeed for the same ETag. Force push
-relaxes ancestry checks, never the publication precondition. Uploads and old
-manifests are immutable, so stale readers retain a consistent object/ref snapshot.
+relaxes ancestry checks, never the publication precondition. Pack uploads and old
+manifests are immutable, so stale Git readers retain a consistent object/ref snapshot;
+ZIP convenience exports are overwritten independently as described above.
 
 Resumable uploads use 8 MiB chunks (a multiple of 256 KiB), status probes after
 interruptions, and server-reported acknowledged offsets. Expired sessions and
-exhausted retries fail the push; a later invocation starts a fresh upload.
+exhausted retries fail a pack/ref operation before commit, or warn for ZIP work
+after commit. A later ref update starts a fresh failed-export attempt.
 Retryable rate limits and server errors use exponential backoff plus jitter.
 Retries are bounded, cancellation is honored, and HTTP clients have timeouts.
 

@@ -201,11 +201,15 @@ func (c *Client) generateID(ctx context.Context) (string, error) {
 }
 
 func (c *Client) createFolder(ctx context.Context, root string) (string, error) {
+	return c.createNamedFolder(ctx, root, "@.git-remote-gdrive")
+}
+
+func (c *Client) createNamedFolder(ctx context.Context, root, name string) (string, error) {
 	id, err := c.generateID(ctx)
 	if err != nil {
 		return "", err
 	}
-	data, _ := json.Marshal(file{ID: id, Title: "@.git-remote-gdrive", MIME: folderMIME, Parents: []parent{{ID: root}}, Properties: []property{{Key: "gdrive-format", Value: "1", Visibility: "PUBLIC"}}})
+	data, _ := json.Marshal(file{ID: id, Title: name, MIME: folderMIME, Parents: []parent{{ID: root}}, Properties: []property{{Key: "gdrive-format", Value: "1", Visibility: "PUBLIC"}}})
 	res, err := c.request(ctx, "POST", c.BaseURL+"/drive/v2/files?supportsAllDrives=true", data, http.Header{"Content-Type": {"application/json"}})
 	if err != nil && !statusIs(err, 409) {
 		return "", err
@@ -217,19 +221,91 @@ func (c *Client) createFolder(ctx context.Context, root string) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	if !f.in(root) || f.MIME != folderMIME || f.value("gdrive-format") != "1" {
+	if !f.in(root) || f.Title != name || f.MIME != folderMIME || f.value("gdrive-format") != "1" {
 		return "", errors.New("created repository directory is invalid")
 	}
 	return id, nil
 }
 
 func (c *Client) upload(ctx context.Context, dir, name string, reader io.ReadSeeker, size int64) (string, error) {
-	id, err := c.generateID(ctx)
-	if err != nil {
-		return "", err
+	return c.uploadFile(ctx, file{}, dir, name, reader, size)
+}
+
+// findArchive looks only inside the canonical archive directory. A name search
+// also reuses ZIPs left by deleted refs or attempts that did not publish a manifest.
+func (c *Client) findArchive(ctx context.Context, dir, name string) (file, error) {
+	escape := func(value string) string { return strings.NewReplacer(`\`, `\\`, `'`, `\'`).Replace(value) }
+	query := url.Values{
+		"q":                 {fmt.Sprintf("'%s' in parents and title = '%s' and trashed = false", escape(dir), escape(name))},
+		"supportsAllDrives": {"true"}, "includeItemsFromAllDrives": {"true"},
+		"maxResults": {"1000"}, "fields": {"items(id,mimeType,etag),nextPageToken,incompleteSearch"},
 	}
-	data, _ := json.Marshal(file{ID: id, Title: name, MIME: "application/octet-stream", Parents: []parent{{ID: dir}}})
-	res, err := c.request(ctx, "POST", c.BaseURL+"/upload/drive/v2/files?uploadType=resumable&supportsAllDrives=true", data, http.Header{"Content-Type": {"application/json"}, "X-Upload-Content-Type": {"application/octet-stream"}, "X-Upload-Content-Length": {strconv.FormatInt(size, 10)}})
+	var match file
+	for {
+		res, err := c.request(ctx, "GET", c.BaseURL+"/drive/v2/files?"+query.Encode(), nil, nil)
+		if err != nil {
+			return file{}, err
+		}
+		var page struct {
+			Items      []file `json:"items"`
+			Next       string `json:"nextPageToken"`
+			Incomplete bool   `json:"incompleteSearch"`
+		}
+		err = json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&page)
+		res.Body.Close()
+		if err != nil {
+			return file{}, err
+		}
+		if page.Incomplete {
+			return file{}, errors.New("Drive archive search was incomplete; retry push")
+		}
+		for _, item := range page.Items {
+			if match.ID != "" {
+				return file{}, errors.New("multiple Drive files have the ZIP name; remove the duplicate before pushing")
+			}
+			if item.MIME != "application/zip" && item.MIME != "application/octet-stream" {
+				return file{}, errors.New("ZIP name is occupied by a non-archive Drive file")
+			}
+			if item.ID == "" || item.ETag == "" {
+				return file{}, errors.New("Drive returned incomplete ZIP metadata")
+			}
+			match = item
+		}
+		if page.Next == "" {
+			return match, nil
+		}
+		query.Set("pageToken", page.Next)
+	}
+}
+
+func (c *Client) uploadFile(ctx context.Context, existing file, dir, name string, reader io.ReadSeeker, size int64) (string, error) {
+	id := existing.ID
+	method, endpoint := "POST", c.BaseURL+"/upload/drive/v2/files?uploadType=resumable&supportsAllDrives=true"
+	metadata := file{Title: name}
+	if id == "" {
+		var err error
+		id, err = c.generateID(ctx)
+		if err != nil {
+			return "", err
+		}
+		metadata.ID, metadata.Parents = id, []parent{{ID: dir}}
+	} else {
+		if existing.ETag == "" {
+			return "", errors.New("Drive returned no ZIP ETag; refusing an unconditional overwrite")
+		}
+		method, endpoint = "PUT", c.BaseURL+"/upload/drive/v2/files/"+url.PathEscape(id)+"?uploadType=resumable&supportsAllDrives=true"
+	}
+	mimeType := "application/octet-stream"
+	if strings.HasSuffix(name, ".zip") {
+		mimeType = "application/zip"
+	}
+	metadata.MIME = mimeType
+	data, _ := json.Marshal(metadata)
+	headers := http.Header{"Content-Type": {"application/json"}, "X-Upload-Content-Type": {mimeType}, "X-Upload-Content-Length": {strconv.FormatInt(size, 10)}}
+	if existing.ID != "" {
+		headers.Set("If-Match", existing.ETag)
+	}
+	res, err := c.request(ctx, method, endpoint, data, headers)
 	if err != nil {
 		return "", err
 	}
@@ -259,7 +335,7 @@ func (c *Client) upload(ctx context.Context, dir, name string, reader io.ReadSee
 			return "", err
 		}
 		req.ContentLength = end - offset
-		req.Header.Set("Content-Type", "application/octet-stream")
+		req.Header.Set("Content-Type", mimeType)
 		req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, end-1, size))
 		response, sendErr := c.HTTP.Do(req)
 		if sendErr == nil && (response.StatusCode == 200 || response.StatusCode == 201) {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/url"
 	"strconv"
 	"strings"
@@ -23,12 +24,13 @@ func FolderID(raw string) (string, error) {
 }
 
 type Helper struct {
-	OpenStore func(context.Context) (repository.Store, error)
-	Git       repository.Git
-	store     repository.Store
-	manifest  *repository.Manifest
-	version   string
-	dryRun    bool
+	OpenStore   func(context.Context) (repository.Store, error)
+	Diagnostics io.Writer
+	Git         repository.Git
+	store       repository.Store
+	manifest    *repository.Manifest
+	version     string
+	dryRun      bool
 }
 
 func (h *Helper) load(ctx context.Context) error {
@@ -244,6 +246,10 @@ func (h *Helper) apply(ctx context.Context, updates []update) error {
 	next.Refs = make(map[string]string)
 	next.Peeled = make(map[string]string)
 	next.Packs = append([]repository.Pack(nil), h.manifest.Packs...)
+	next.Archives = maps.Clone(h.manifest.Archives)
+	if next.Archives == nil {
+		next.Archives = make(map[string]repository.Archive)
+	}
 	for ref, oid := range h.manifest.Refs {
 		next.Refs[ref] = oid
 	}
@@ -254,6 +260,7 @@ func (h *Helper) apply(ctx context.Context, updates []update) error {
 		if u.src == "" {
 			delete(next.Refs, u.dst)
 			delete(next.Peeled, u.dst)
+			delete(next.Archives, u.dst)
 			continue
 		}
 		oid, err := g.Resolve(ctx, u.src)
@@ -277,6 +284,11 @@ func (h *Helper) apply(ctx context.Context, updates []update) error {
 			}
 		}
 		next.Refs[u.dst] = oid
+		if archive, ok := next.Archives[u.dst]; ok && archive.OID != oid {
+			// The newly published ref has no confirmed ZIP until the post-push
+			// export succeeds. Keep the old file, but do not advertise it as current.
+			delete(next.Archives, u.dst)
+		}
 		delete(next.Peeled, u.dst)
 		if strings.HasPrefix(u.dst, "refs/tags/") && kind == "tag" {
 			next.Peeled[u.dst] = g.Peel(ctx, oid)
@@ -339,7 +351,61 @@ func (h *Helper) apply(ctx context.Context, updates []update) error {
 	if err := h.store.Publish(ctx, h.version, &next); err != nil {
 		return err
 	}
-	// Any subsequent batch must read the version just published.
+	// Refs are committed. Export failures must not turn a successful push into
+	// an error or trigger rollback. ZIP metadata gets its own conditional publish.
+	h.manifest = nil
+	h.completeArchives(ctx, g, updates, next.Refs)
 	h.manifest = nil
 	return nil
+}
+
+func (h *Helper) warnArchive(err error) {
+	if h.Diagnostics != nil {
+		fmt.Fprintf(h.Diagnostics, "git-remote-gdrive: warning: refs were updated, but ZIP export is incomplete: %s\n", strings.Join(strings.Fields(err.Error()), " "))
+	}
+}
+
+func (h *Helper) completeArchives(ctx context.Context, g repository.Git, updates []update, pushedRefs map[string]string) {
+	var refs []string
+	for _, u := range updates {
+		if u.src != "" && (strings.HasPrefix(u.dst, "refs/heads/") || strings.HasPrefix(u.dst, "refs/tags/")) {
+			refs = append(refs, u.dst)
+		}
+	}
+	if len(refs) == 0 {
+		return
+	}
+	// Loading the published snapshot refreshes Store's version precondition. A
+	// newer push may already exist; never restore its refs to our earlier values.
+	if err := h.load(ctx); err != nil {
+		h.warnArchive(err)
+		return
+	}
+	current := h.manifest
+	if current.Archives == nil {
+		current.Archives = make(map[string]repository.Archive)
+	}
+	changed := false
+	for _, ref := range refs {
+		oid := pushedRefs[ref]
+		if current.Refs[ref] != oid {
+			h.warnArchive(fmt.Errorf("%s changed again; skipped outdated ZIP", ref))
+			continue
+		}
+		if archive, ok := current.Archives[ref]; ok && archive.OID == oid {
+			continue
+		}
+		archive, err := g.MakeArchive(ctx, h.store, ref, oid)
+		if err != nil {
+			h.warnArchive(err)
+			continue
+		}
+		current.Archives[ref] = archive
+		changed = true
+	}
+	if changed {
+		if err := h.store.Publish(ctx, h.version, current); err != nil {
+			h.warnArchive(fmt.Errorf("save ZIP metadata: %w", err))
+		}
+	}
 }

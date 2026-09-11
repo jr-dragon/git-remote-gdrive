@@ -129,6 +129,55 @@ that branch is deleted, then moves to a remaining branch if one exists.
 
 ## Storage format and limits
 
+Every pushed branch or tag also gets a ZIP snapshot under the selected Drive root:
+
+```text
+YOUR_FOLDER_ID/
+  branch/
+    main.zip
+    feature%2Flogin.zip
+  tags/
+    v1.0.zip
+  @.git-remote-gdrive/
+    ...packs and manifests...
+```
+
+Archive names use the destination branch/tag name, without an object ID. Ref
+names are percent-encoded, so `feature/login` becomes `feature%2Flogin` and remains
+one filename. An annotated tag's ZIP contains the dereferenced version's files.
+ZIPs follow `git archive` behavior, including
+`export-ignore`/`export-subst` attributes. They contain tracked files, not `.git`,
+uncommitted changes, or untracked files; submodule contents are not fetched. A tag
+pointing directly to a blob produces a ZIP with one file named `blob`.
+
+The helper creates `branch/` and `tags/` lazily and records their Drive IDs in the
+manifest for reuse across users. Push first uploads the pack and publishes refs;
+only after that succeeds does it generate/upload or overwrite ZIPs. Successful
+exports are recorded in a separate conditional manifest update containing each
+ZIP's ID, object ID, size, and SHA-256 digest. A same-name ZIP is overwritten
+in place using its existing Drive file ID; a ZIP is created only if none exists.
+Ref deletion removes the current mapping while leaving the last ZIP in place,
+and recreating the ref reuses that file. Dry runs and unchanged refs do not upload ZIPs. Older
+repositories remain readable; ZIPs are added as their branches/tags are updated.
+
+If ref publication fails, ZIPs are not touched. If ZIP generation, upload, or its
+metadata update fails afterward, Git push stays successful and stderr shows a
+warning. Refs are not rolled back. A changed ref's old ZIP mapping is removed when
+refs are published, so a missing mapping indicates an unconfirmed/missing export.
+Its old ZIP file may remain until a later successful update. An up-to-date push
+does not retry failed exports; a later ref update triggers another export attempt.
+
+Drive has no multi-file transaction: ZIPs may temporarily lag behind refs or lack
+confirmed metadata. The helper reloads current refs before exporting, skips refs
+that changed again, checks the manifest version before overwriting, and sends the
+ZIP's ETag when starting its update. A later concurrent push can still race an
+in-progress upload. ZIP checksums describe confirmed export bytes; only packs and
+manifests retain authoritative Git history.
+Existing files with old `<name>-<object-id>.zip` names are left untouched; new
+pushes use the fixed names. The helper does not adopt unrelated same-name folders;
+multiple matching ZIP files in its archive directory cause an ambiguity error.
+Use updated helpers for pushes to preserve ZIP tracking.
+
 The root folder's public `gdrive-repo` property identifies the canonical
 `@.git-remote-gdrive/` directory. Its `gdrive-manifest` property points to the current
 immutable `manifest.json` by Drive file ID. Drive allows repeated file names, so
@@ -167,11 +216,13 @@ Current limitations and costs:
 - Fetch transfers the active snapshot's packs, including objects from refs beyond
   the requested branch. Compaction trades a periodic full upload for a bounded
   active pack count.
-- Old manifests, superseded packs, and files left by interrupted/conflicting pushes
+- Legacy ZIPs, manifests, superseded packs, and files left by interrupted/conflicting pushes
   are retained. This protects readers using older snapshots but consumes Drive
   quota. Automatic garbage collection is not implemented; do not delete files
   while readers or writers are active.
-- Local temporary disk space is needed for pack creation/download, in addition to
+- Each updated branch/tag uploads a full ZIP snapshot in addition to Git's pack
+  data. This adds transfer time and Drive storage proportional to those snapshots.
+- Local temporary disk space is needed for ZIP creation and pack creation/download, in addition to
   Git's object store. Transfer memory is bounded by the upload chunk size rather
   than the whole pack. Manifest input is limited to 8 MiB.
 - Live Google Drive behavior, including ETag publication and shared-drive access,

@@ -46,6 +46,7 @@ Preserve the specified `git-remote-drive` credential directory name, which diffe
 - Preserve the storage contract in `docs/storage.md`: PUBLIC root properties identify the canonical `@.git-remote-gdrive` directory and immutable manifest; never identify repositories by file names alone.
 - Publish new refs only after successful object and manifest uploads, using the expected manifest version and a conditional root metadata update. Never replace this with an unconditional write, even for force pushes.
 - Keep the active incremental pack chain bounded. Retain previous snapshots and packs until a separate, safe garbage-collection design is implemented.
+- Only after refs are successfully published, upload branch/tag ZIP snapshots to root-level `branch/` and `tags/` folders. Use fixed percent-encoded ref names ending in `.zip` and overwrite an existing same-name ZIP in place. Use the exact published destination ref object, then save folder/archive IDs in a separate conditional manifest update that preserves current refs. ZIP or ZIP-metadata failures must warn on stderr without failing or rolling back the already-successful Git push. ZIPs are mutable convenience exports; only packs and manifests retain immutable history. Ref deletion leaves the last ZIP in place.
 - Preserve Git object integrity and ref consistency. Account for interrupted transfers and concurrent writers when designing updates; do not report success for an incomplete operation.
 - Keep operations scoped to the selected repository folder and avoid modifying unrelated Drive files.
 

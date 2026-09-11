@@ -26,16 +26,25 @@ type Pack struct {
 	Size   int64  `json:"size"`
 }
 
+type Archive struct {
+	ID     string `json:"id"`
+	OID    string `json:"oid"`
+	SHA256 string `json:"sha256"`
+	Size   int64  `json:"size"`
+}
+
 type Manifest struct {
-	Format       string            `json:"format"`
-	Version      int               `json:"version"`
-	ObjectFormat string            `json:"object_format"`
-	Root         string            `json:"root"`
-	Directory    string            `json:"directory"`
-	HEAD         string            `json:"head"`
-	Refs         map[string]string `json:"refs"`
-	Peeled       map[string]string `json:"peeled,omitempty"`
-	Packs        []Pack            `json:"packs"`
+	Format             string             `json:"format"`
+	Version            int                `json:"version"`
+	ObjectFormat       string             `json:"object_format"`
+	Root               string             `json:"root"`
+	Directory          string             `json:"directory"`
+	HEAD               string             `json:"head"`
+	Refs               map[string]string  `json:"refs"`
+	Peeled             map[string]string  `json:"peeled,omitempty"`
+	Packs              []Pack             `json:"packs"`
+	ArchiveDirectories map[string]string  `json:"archive_directories,omitempty"`
+	Archives           map[string]Archive `json:"archives,omitempty"`
 }
 
 func Empty() *Manifest {
@@ -95,6 +104,20 @@ func (m *Manifest) Validate() error {
 	if len(m.Refs) > 0 && len(m.Packs) == 0 {
 		return errors.New("repository refs have no packs")
 	}
+	for kind, id := range m.ArchiveDirectories {
+		if (kind != "branch" && kind != "tags") || !ValidID(id) || id == m.Root || id == m.Directory {
+			return errors.New("invalid archive directory")
+		}
+	}
+	if id := m.ArchiveDirectories["branch"]; id != "" && id == m.ArchiveDirectories["tags"] {
+		return errors.New("branch and tag archives must use different directories")
+	}
+	for ref, archive := range m.Archives {
+		kind, _, err := ArchiveLocation(ref, archive.OID)
+		if err != nil || archive.OID != m.Refs[ref] || !ValidID(archive.ID) || !digestPattern.MatchString(archive.SHA256) || archive.Size < 22 || m.ArchiveDirectories[kind] == "" {
+			return errors.New("invalid ref archive")
+		}
+	}
 	return nil
 }
 
@@ -103,6 +126,7 @@ func (m *Manifest) Validate() error {
 type Store interface {
 	Load(context.Context) (*Manifest, string, error)
 	Upload(context.Context, string, io.ReadSeeker, int64) (string, error)
+	UploadArchive(context.Context, string, string, io.ReadSeeker, int64) (string, error)
 	Download(context.Context, Pack, io.Writer) error
 	Publish(context.Context, string, *Manifest) error
 }

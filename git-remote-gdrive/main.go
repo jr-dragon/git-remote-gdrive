@@ -31,7 +31,7 @@ func run(ctx context.Context, args []string, input io.Reader, output io.Writer) 
 	if err != nil {
 		return err
 	}
-	h := remotehelper.Helper{OpenStore: func(ctx context.Context) (repository.Store, error) {
+	h := remotehelper.Helper{Diagnostics: os.Stderr, OpenStore: func(ctx context.Context) (repository.Store, error) {
 		path, err := googleauth.DefaultPath()
 		if err != nil {
 			return nil, err
