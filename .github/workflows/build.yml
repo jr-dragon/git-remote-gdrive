@@ -1,0 +1,126 @@
+name: Build
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.release.id }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            goos: linux
+            goarch: amd64
+            extension: tar.gz
+            executable-suffix: ''
+          - target: linux-arm64
+            goos: linux
+            goarch: arm64
+            extension: tar.gz
+            executable-suffix: ''
+          - target: macos-arm64
+            goos: darwin
+            goarch: arm64
+            extension: tar.gz
+            executable-suffix: ''
+          - target: windows-x86_64
+            goos: windows
+            goarch: amd64
+            extension: zip
+            executable-suffix: .exe
+          - target: windows-arm64
+            goos: windows
+            goarch: arm64
+            extension: zip
+            executable-suffix: .exe
+    env:
+      TARGET: ${{ matrix.target }}
+      ARCHIVE_NAME: git-remote-gdrive-${{ matrix.target }}.${{ matrix.extension }}
+      ARCHIVE_EXTENSION: ${{ matrix.extension }}
+      EXE_SUFFIX: ${{ matrix.executable-suffix }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref }}
+          persist-credentials: false
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build executables
+        shell: bash
+        env:
+          CGO_ENABLED: '0'
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          package_dir="build/release/${TARGET}"
+          mkdir -p "$package_dir"
+          go build -trimpath -ldflags='-s -w' -o "${package_dir}/git-gdrive${EXE_SUFFIX}" ./git-gdrive
+          go build -trimpath -ldflags='-s -w' -o "${package_dir}/git-remote-gdrive${EXE_SUFFIX}" ./git-remote-gdrive
+          cp LICENSE README.md "$package_dir/"
+
+      - name: Package executables and checksum
+        shell: bash
+        working-directory: build/release
+        run: |
+          if [[ "$ARCHIVE_EXTENSION" == zip ]]; then
+            (
+              cd "$TARGET"
+              zip "../${ARCHIVE_NAME}" git-gdrive.exe git-remote-gdrive.exe LICENSE README.md
+            )
+          else
+            tar -czf "$ARCHIVE_NAME" -C "$TARGET" .
+          fi
+          sha256sum "$ARCHIVE_NAME" > "${ARCHIVE_NAME}.sha256"
+
+      - name: Upload release assets
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('node:fs/promises');
+            const path = require('node:path');
+            const release_id = context.payload.release.id;
+            const names = [process.env.ARCHIVE_NAME, `${process.env.ARCHIVE_NAME}.sha256`];
+            const assets = await github.paginate(github.rest.repos.listReleaseAssets, {
+              ...context.repo,
+              release_id,
+              per_page: 100,
+            });
+            for (const name of names) {
+              const data = await fs.readFile(path.join('build', 'release', name));
+              // Replace only this platform's assets when rerunning a failed job.
+              for (const asset of assets.filter(asset => asset.name === name)) {
+                await github.rest.repos.deleteReleaseAsset({
+                  ...context.repo,
+                  asset_id: asset.id,
+                });
+              }
+              await github.rest.repos.uploadReleaseAsset({
+                ...context.repo,
+                release_id,
+                name,
+                data,
+                headers: {
+                  'content-type': name.endsWith('.sha256') ? 'text/plain' : 'application/octet-stream',
+                  'content-length': data.length,
+                },
+              });
+              core.info(`Uploaded ${name}`);
+            }
