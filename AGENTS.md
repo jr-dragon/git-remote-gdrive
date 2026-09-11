@@ -4,7 +4,7 @@
 
 `git-remote-gdrive` is a Go project that enables Git to use Google Drive as a remote repository through the `gdrive://` URL scheme. It integrates Git's remote-helper protocol with the Google Drive API.
 
-The repository is currently a scaffold. The behavior described below is the intended product contract, not a claim that it is already implemented.
+`git-gdrive config` implements authentication. The remote helper and repository storage remain planned work.
 
 ## Binaries and User Interface
 
@@ -14,10 +14,10 @@ The project must provide two binaries available on the user's `PATH`:
 
 - Provides the `git gdrive` command.
 - `git gdrive config` opens the user's browser to perform OAuth authentication with Google.
-- After successful authentication, saves the user's credentials to `~/.config/git-remote-gdirve/credential`.
+- After successful authentication, saves the user's credentials to `~/.config/git-remote-drive/credential`.
 - Shares credential loading and refresh logic with `git-remote-gdrive`.
 
-The `git-remote-gdirve` spelling in the credential path is intentional in this specification. Preserve the exact path unless the user explicitly changes the requirement; do not silently normalize it to the project name.
+Preserve the specified `git-remote-drive` credential directory name, which differs from the project name.
 
 ### `git-remote-gdrive`
 
