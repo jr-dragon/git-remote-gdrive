@@ -4,7 +4,7 @@
 
 `git-remote-gdrive` is a Go project that enables Git to use Google Drive as a remote repository through the `gdrive://` URL scheme. It integrates Git's remote-helper protocol with the Google Drive API.
 
-`git-gdrive config` implements authentication. The remote helper and repository storage remain planned work.
+`git-gdrive config` implements authentication. `git-remote-gdrive` implements clone, fetch, and push using immutable pack files and versioned manifests. See `docs/storage.md` for the format and publication algorithm.
 
 ## Binaries and User Interface
 
@@ -43,7 +43,9 @@ Preserve the specified `git-remote-drive` credential directory name, which diffe
 - Handle protocol line boundaries, command batches, and end-of-input correctly.
 - Validate `gdrive://{folder_id}` URLs before issuing Drive requests.
 - Keep command entry points small and separate authentication, credential persistence, remote-helper protocol handling, and Drive storage concerns into reusable Go packages.
-- Define and document the Drive storage layout before relying on it. The initial specification does not prescribe an object format, ref layout, locking mechanism, or transfer strategy.
+- Preserve the storage contract in `docs/storage.md`: PUBLIC root properties identify the canonical `@.git-remote-gdrive` directory and immutable manifest; never identify repositories by file names alone.
+- Publish new refs only after successful object and manifest uploads, using the expected manifest version and a conditional root metadata update. Never replace this with an unconditional write, even for force pushes.
+- Keep the active incremental pack chain bounded. Retain previous snapshots and packs until a separate, safe garbage-collection design is implemented.
 - Preserve Git object integrity and ref consistency. Account for interrupted transfers and concurrent writers when designing updates; do not report success for an incomplete operation.
 - Keep operations scoped to the selected repository folder and avoid modifying unrelated Drive files.
 
