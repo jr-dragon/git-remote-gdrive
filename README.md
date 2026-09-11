@@ -1,5 +1,7 @@
 # git-remote-gdrive
 
+[![Testing](https://github.com/jr-dragon/git-remote-gdrive/actions/workflows/testing.yml/badge.svg)](https://github.com/jr-dragon/git-remote-gdrive/actions/workflows/testing.yml)
+
 Use Google Drive as a Git remote through `gdrive://{folder_id}`. The project
 provides browser OAuth authentication and a remote helper for clone, fetch, and push.
 
