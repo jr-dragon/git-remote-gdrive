@@ -177,3 +177,26 @@ Current limitations and costs:
   the protocol against a mock API, not Google's deployed service.
 
 For the detailed format and commit algorithm, see [docs/storage.md](docs/storage.md).
+
+## GitHub Actions
+
+The **Testing** workflow runs `go test -race ./...` and `go vet ./...` on every
+push to `main`. Both workflows use the Go version declared in `go.mod`.
+
+Publishing a GitHub Release (including a prerelease) triggers **Build** for its
+tag. It cross-compiles both executables with CGO disabled for these targets:
+
+| Platform | Release archive |
+| --- | --- |
+| Linux x86_64 | `git-remote-gdrive-linux-x86_64.tar.gz` |
+| Linux ARM64 | `git-remote-gdrive-linux-arm64.tar.gz` |
+| macOS ARM64 (Apple Silicon) | `git-remote-gdrive-macos-arm64.tar.gz` |
+| Windows x86_64 | `git-remote-gdrive-windows-x86_64.zip` |
+| Windows ARM64 | `git-remote-gdrive-windows-arm64.zip` |
+
+Each archive contains `git-gdrive`, `git-remote-gdrive` (with `.exe` on Windows),
+LICENSE, and README. The workflow attaches the archive and its `.sha256` checksum
+to the triggering release using the built-in `GITHUB_TOKEN`; no additional secret
+is required. Rerunning a build replaces that platform's matching assets. Releases
+must allow asset uploads/replacement; this workflow does not enable immutable
+releases. ARM targets mean 64-bit ARM, not 32-bit ARMv7.
