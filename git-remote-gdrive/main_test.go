@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -36,8 +38,7 @@ func TestHelperProcess(t *testing.T) {
 		return
 	}
 	args := os.Args
-	client := drive.NewClient(&http.Client{Timeout: 10 * time.Second})
-	client.BaseURL = os.Getenv("GDRIVE_TEST_URL")
+	client := testAPI(t, &http.Client{Timeout: 10 * time.Second}, os.Getenv("GDRIVE_TEST_URL"), os.Getenv("GIT_GDRIVE_API_BACKEND"))
 	open := func(_ context.Context, root string) (repository.Store, error) {
 		return &drive.Store{Client: client, Root: root}, nil
 	}
@@ -83,6 +84,7 @@ type mockUpload struct {
 	File     *mockFile
 	Bytes    []byte
 	Complete bool
+	V3       bool
 }
 type mockDrive struct {
 	mu                  sync.Mutex
@@ -98,11 +100,13 @@ type mockDrive struct {
 	interruptUpload     bool
 	interruptZIP        bool
 	lostCommit          bool
+	lostUpload          bool
 	events              []string
 	server              *httptest.Server
+	requests            int
 }
 
-func newMockDrive(t *testing.T) *mockDrive {
+func newMockDrive(t testing.TB) *mockDrive {
 	d := &mockDrive{files: map[string]*mockFile{"root": {ID: "root", Title: "repo", MIME: "application/vnd.google-apps.folder", ETag: `"0"`}}, uploads: map[string]*mockUpload{}}
 	d.server = httptest.NewServer(http.HandlerFunc(d.serve))
 	t.Cleanup(d.server.Close)
@@ -112,7 +116,118 @@ func newMockDrive(t *testing.T) *mockDrive {
 func (d *mockDrive) serve(w http.ResponseWriter, r *http.Request) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.requests++
 	w.Header().Set("Content-Type", "application/json")
+	v3 := strings.Contains(r.URL.Path, "/drive/v3/")
+	decodeFile := func(reader io.Reader, f *mockFile) error {
+		if !v3 {
+			return json.NewDecoder(reader).Decode(f)
+		}
+		var wire struct {
+			ID            string            `json:"id"`
+			Name          string            `json:"name"`
+			MIME          string            `json:"mimeType"`
+			Parents       []string          `json:"parents"`
+			Properties    map[string]string `json:"properties"`
+			AppProperties map[string]string `json:"appProperties"`
+		}
+		decoder := json.NewDecoder(reader)
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&wire); err != nil {
+			return err
+		}
+		f.ID, f.Title, f.MIME = wire.ID, wire.Name, wire.MIME
+		for _, id := range wire.Parents {
+			f.Parents = append(f.Parents, struct {
+				ID string `json:"id"`
+			}{ID: id})
+		}
+		for key, value := range wire.Properties {
+			f.Properties = append(f.Properties, mockProperty{Key: key, Value: value, Visibility: "PUBLIC"})
+		}
+		for key, value := range wire.AppProperties {
+			f.Properties = append(f.Properties, mockProperty{Key: key, Value: value, Visibility: "PRIVATE"})
+		}
+		return nil
+	}
+	writeFile := func(f *mockFile) {
+		if !v3 {
+			json.NewEncoder(w).Encode(f)
+			return
+		}
+		parents := []string{}
+		public, private := map[string]string{}, map[string]string{}
+		for _, p := range f.Parents {
+			parents = append(parents, p.ID)
+		}
+		for _, p := range f.Properties {
+			if p.Visibility == "PUBLIC" {
+				public[p.Key] = p.Value
+			} else {
+				private[p.Key] = p.Value
+			}
+		}
+		w.Header().Set("ETag", f.ETag)
+		json.NewEncoder(w).Encode(map[string]any{"id": f.ID, "name": f.Title, "mimeType": f.MIME, "parents": parents, "properties": public, "appProperties": private})
+	}
+	if v3 {
+		r.URL.Path = strings.Replace(r.URL.Path, "/drive/v3/", "/drive/v2/", 1)
+		if strings.HasPrefix(r.URL.Path, "/upload/") && r.Method == "PATCH" {
+			r.Method = "PUT"
+		}
+		query := r.URL.Query()
+		if q := query.Get("q"); q != "" {
+			if !strings.Contains(q, "and name =") {
+				w.WriteHeader(400)
+				return
+			}
+			query.Set("q", strings.Replace(q, "and name =", "and title =", 1))
+			r.URL.RawQuery = query.Encode()
+		}
+	}
+	// Model the SDK's multipart uploads and its resumable protocol headers.
+	var media []byte
+	isMultipart := r.URL.Query().Get("uploadType") == "multipart"
+	if isMultipart {
+		_, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if err != nil {
+			w.WriteHeader(400)
+			return
+		}
+		parts := multipart.NewReader(r.Body, params["boundary"])
+		meta, err := parts.NextPart()
+		if err != nil {
+			w.WriteHeader(400)
+			return
+		}
+		data, _ := io.ReadAll(meta)
+		part, err := parts.NextPart()
+		if err != nil {
+			w.WriteHeader(400)
+			return
+		}
+		media, _ = io.ReadAll(part)
+		r.Body = io.NopCloser(bytes.NewReader(data))
+		var f mockFile
+		_ = decodeFile(bytes.NewReader(data), &f)
+		if (d.failUpload && strings.HasSuffix(f.Title, ".pack")) || (d.failZIP && strings.HasSuffix(f.Title, ".zip")) || (d.failAsset && strings.HasPrefix(f.Title, "asset-sha256-")) {
+			w.WriteHeader(400)
+			return
+		}
+		if (d.interruptUpload && strings.HasSuffix(f.Title, ".pack")) || (d.interruptZIP && strings.HasSuffix(f.Title, ".zip")) {
+			d.interruptUpload, d.interruptZIP = false, false
+			w.WriteHeader(503)
+			return
+		}
+	}
+	resumeIncomplete := func() {
+		if r.Header.Get("X-GUploader-No-308") == "yes" {
+			w.Header().Set("X-Http-Status-Code-Override", "308")
+			w.WriteHeader(200)
+		} else {
+			w.WriteHeader(308)
+		}
+	}
 	if r.URL.Path == "/drive/v2/files/generateIds" {
 		d.seq++
 		fmt.Fprintf(w, `{"ids":["file%d"]}`, d.seq)
@@ -130,7 +245,15 @@ func (d *mockDrive) serve(w http.ResponseWriter, r *http.Request) {
 				items = append(items, f)
 			}
 		}
-		json.NewEncoder(w).Encode(map[string]any{"items": items})
+		if v3 {
+			files := []map[string]string{}
+			for _, f := range items {
+				files = append(files, map[string]string{"id": f.ID, "mimeType": f.MIME})
+			}
+			json.NewEncoder(w).Encode(map[string]any{"files": files})
+		} else {
+			json.NewEncoder(w).Encode(map[string]any{"items": items})
+		}
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, "/upload/drive/v2/files/") && r.Method == "PUT" {
@@ -145,7 +268,7 @@ func (d *mockDrive) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var metadata mockFile
-		if err := json.NewDecoder(r.Body).Decode(&metadata); err != nil {
+		if err := decodeFile(r.Body, &metadata); err != nil {
 			w.WriteHeader(400)
 			return
 		}
@@ -156,8 +279,14 @@ func (d *mockDrive) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		d.seq++
 		f.ETag = strconv.Quote(strconv.Itoa(d.seq))
+		if isMultipart {
+			f.Data = media
+			d.files[f.ID] = &f
+			writeFile(&f)
+			return
+		}
 		path := fmt.Sprintf("/session/update-%d", d.seq)
-		d.uploads[path] = &mockUpload{File: &f}
+		d.uploads[path] = &mockUpload{File: &f, V3: v3}
 		w.Header().Set("Location", d.server.URL+path)
 		return
 	}
@@ -167,19 +296,26 @@ func (d *mockDrive) serve(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
+		v3 = u.V3
+		if u.Complete {
+			writeFile(u.File)
+			return
+		}
 		if strings.HasPrefix(r.Header.Get("Content-Range"), "bytes */") {
-			if r.Header.Get("Content-Range") == "bytes */0" {
+			total, _ := strconv.ParseInt(strings.TrimPrefix(r.Header.Get("Content-Range"), "bytes */"), 10, 64)
+			if total == int64(len(u.Bytes)) {
 				u.Complete = true
+				u.File.Data = u.Bytes
 				d.files[u.File.ID] = u.File
 			}
 			if u.Complete {
-				json.NewEncoder(w).Encode(u.File)
+				writeFile(u.File)
 				return
 			}
 			if len(u.Bytes) > 0 {
 				w.Header().Set("Range", fmt.Sprintf("bytes=0-%d", len(u.Bytes)-1))
 			}
-			w.WriteHeader(308)
+			resumeIncomplete()
 			return
 		}
 		if d.failUpload && strings.HasSuffix(u.File.Title, ".pack") {
@@ -196,12 +332,25 @@ func (d *mockDrive) serve(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(400)
 			return
 		}
-		var start, end, total int64
-		if _, err := fmt.Sscanf(r.Header.Get("Content-Range"), "bytes %d-%d/%d", &start, &end, &total); err != nil || start != int64(len(u.Bytes)) {
+		var start, end int64
+		var totalText string
+		if _, err := fmt.Sscanf(r.Header.Get("Content-Range"), "bytes %d-%d/%s", &start, &end, &totalText); err != nil || start > int64(len(u.Bytes)) || start < 0 || end < start {
 			w.WriteHeader(400)
 			return
 		}
 		data, _ := io.ReadAll(r.Body)
+		total, totalErr := strconv.ParseInt(totalText, 10, 64)
+		if totalErr != nil && totalText != "*" {
+			w.WriteHeader(400)
+			return
+		}
+		if totalText == "*" {
+			total = -1
+		}
+		if int64(len(data)) != end-start+1 {
+			w.WriteHeader(400)
+			return
+		}
 		if (d.interruptUpload && strings.HasSuffix(u.File.Title, ".pack")) || (d.interruptZIP && strings.HasSuffix(u.File.Title, ".zip")) {
 			d.interruptUpload = false
 			d.interruptZIP = false
@@ -209,7 +358,9 @@ func (d *mockDrive) serve(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(503)
 			return
 		}
-		u.Bytes = append(u.Bytes, data...)
+		// Ignore accepted bytes when a resumed request overlaps an earlier chunk.
+		overlap := min(int64(len(data)), int64(len(u.Bytes))-start)
+		u.Bytes = append(u.Bytes, data[overlap:]...)
 		if int64(len(u.Bytes)) == total {
 			if strings.HasPrefix(u.File.Title, "asset-sha256-") {
 				d.events = append(d.events, "asset")
@@ -220,16 +371,21 @@ func (d *mockDrive) serve(w http.ResponseWriter, r *http.Request) {
 			}
 			d.files[u.File.ID] = u.File
 			u.Complete = true
-			json.NewEncoder(w).Encode(u.File)
+			if d.lostUpload {
+				d.lostUpload = false
+				w.WriteHeader(503)
+				return
+			}
+			writeFile(u.File)
 			return
 		}
 		w.Header().Set("Range", fmt.Sprintf("bytes=0-%d", len(u.Bytes)-1))
-		w.WriteHeader(308)
+		resumeIncomplete()
 		return
 	}
 	if r.Method == "POST" {
 		var f mockFile
-		if err := json.NewDecoder(r.Body).Decode(&f); err != nil {
+		if err := decodeFile(r.Body, &f); err != nil {
 			w.WriteHeader(400)
 			return
 		}
@@ -241,15 +397,29 @@ func (d *mockDrive) serve(w http.ResponseWriter, r *http.Request) {
 			if f.MIME == "application/zip" {
 				d.events = append(d.events, "zip")
 			}
+			if isMultipart {
+				f.Data, f.ETag = media, `"1"`
+				if strings.HasPrefix(f.Title, "asset-sha256-") {
+					d.events = append(d.events, "asset")
+				}
+				d.files[f.ID] = &f
+				if d.lostUpload {
+					d.lostUpload = false
+					w.WriteHeader(503)
+					return
+				}
+				writeFile(&f)
+				return
+			}
 			path := "/session/" + f.ID
-			d.uploads[path] = &mockUpload{File: &f}
+			d.uploads[path] = &mockUpload{File: &f, V3: v3}
 			w.Header().Set("Location", d.server.URL+path)
 			w.WriteHeader(200)
 			return
 		}
 		f.ETag = `"1"`
 		d.files[f.ID] = &f
-		json.NewEncoder(w).Encode(f)
+		writeFile(&f)
 		return
 	}
 	id := strings.TrimPrefix(r.URL.Path, "/drive/v2/files/")
@@ -264,13 +434,13 @@ func (d *mockDrive) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var patch mockFile
-		json.NewDecoder(r.Body).Decode(&patch)
+		decodeFile(r.Body, &patch)
 		if patch.Title != "" {
 			f.Title = patch.Title
 			d.seq++
 			f.ETag = strconv.Quote(strconv.Itoa(d.seq))
 			d.events = append(d.events, "rename")
-			json.NewEncoder(w).Encode(f)
+			writeFile(f)
 			return
 		}
 		if d.failArchiveMetadata {
@@ -296,14 +466,14 @@ func (d *mockDrive) serve(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(503)
 			return
 		}
-		json.NewEncoder(w).Encode(f)
+		writeFile(f)
 		return
 	}
 	if r.URL.Query().Get("alt") == "media" {
 		w.Write(f.Data)
 		return
 	}
-	json.NewEncoder(w).Encode(f)
+	writeFile(f)
 }
 
 func (d *mockDrive) manifest(t *testing.T) repository.Manifest {
@@ -364,7 +534,7 @@ func testEnvironment(t *testing.T, d *mockDrive) []string {
 		}
 		env = append(env, v)
 	}
-	return append(env, "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"), "HOME="+t.TempDir(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_AUTHOR_NAME=Test", "GIT_AUTHOR_EMAIL=test@example.com", "GIT_COMMITTER_NAME=Test", "GIT_COMMITTER_EMAIL=test@example.com", "GIT_TERMINAL_PROMPT=0", "GDRIVE_TEST_HELPER=1", "GDRIVE_TEST_URL="+d.server.URL)
+	return append(env, "GIT_GDRIVE_API_BACKEND="+os.Getenv("GIT_GDRIVE_API_BACKEND"), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"), "HOME="+t.TempDir(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_AUTHOR_NAME=Test", "GIT_AUTHOR_EMAIL=test@example.com", "GIT_COMMITTER_NAME=Test", "GIT_COMMITTER_EMAIL=test@example.com", "GIT_TERMINAL_PROMPT=0", "GDRIVE_TEST_HELPER=1", "GDRIVE_TEST_URL="+d.server.URL)
 }
 
 func TestGitRoundTrip(t *testing.T) {
@@ -483,8 +653,7 @@ func TestCapabilitiesWithoutCredentials(t *testing.T) {
 func TestConcurrentInitialization(t *testing.T) {
 	d := newMockDrive(t)
 	newStore := func() *drive.Store {
-		c := drive.NewClient(d.server.Client())
-		c.BaseURL = d.server.URL
+		c := d.api(t)
 		return &drive.Store{Client: c, Root: "root"}
 	}
 	a, b := newStore(), newStore()
@@ -518,8 +687,7 @@ func TestConcurrentInitialization(t *testing.T) {
 func TestLargeResumableUpload(t *testing.T) {
 	d := newMockDrive(t)
 	d.interruptUpload = true
-	c := drive.NewClient(d.server.Client())
-	c.BaseURL = d.server.URL
+	c := d.api(t)
 	store := &drive.Store{Client: c, Root: "root"}
 	if _, _, err := store.Load(context.Background()); err != nil {
 		t.Fatal(err)
@@ -778,8 +946,7 @@ func TestPushArchives(t *testing.T) {
 
 func TestArchiveOverwriteResumeAndStaleWriter(t *testing.T) {
 	d := newMockDrive(t)
-	client := drive.NewClient(d.server.Client())
-	client.BaseURL = d.server.URL
+	client := d.api(t)
 	s := &drive.Store{Client: client, Root: "root"}
 	ctx := context.Background()
 	m, version, err := s.Load(ctx)

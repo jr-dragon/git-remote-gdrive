@@ -55,7 +55,7 @@ temporary files and must match the pointer before installation. Failed downloads
 cannot install partial or unverified content. Temporary files and directories use
 restrictive permissions where supported.
 
-## Push and Drive storage
+## Push and remote storage
 
 Push examines blobs reachable from all resulting refs, including historical
 commits and tags pointing directly to blobs. It uses Git batch object inspection
@@ -63,19 +63,22 @@ and only reads small candidate pointer blobs, without loading full ordinary
 binaries. It recognizes the reserved pointer format regardless of current
 attributes, preserving assets from deleted or renamed historical paths.
 
-The manifest v2 `assets` index maps each SHA-256 to its Drive file ID and size.
-Missing assets are uploaded sequentially as immutable `asset-sha256-<digest>`
-files directly within the canonical `@.git-remote-gdrive` directory. Discovery
-uses manifest IDs, never a filename search. Existing indexed digests are reused;
-different paths and versions with identical bytes share one object. This avoids
-one API search or upload per reference to the same content. Transfers use the
-existing resumable transport and bounded rate-limit retries. Empty assets are
-supported. Many unique tiny assets still cost one Drive object each; use ordinary
-Git storage for those files, where pack files aggregate them efficiently.
+The manifest v2 `assets` index maps each SHA-256 to a Store object ID and size.
+For `gdrive://`, missing assets are uploaded sequentially as immutable
+`asset-sha256-<digest>` files directly within the canonical
+`@.git-remote-gdrive` directory. Discovery uses manifest IDs, never a filename
+search, and transfers use the selected Drive backend's upload/retry behavior.
+For `gdrive-local://`, the same bytes are stored as immutable `obj-<sha256>`
+objects in the portable storage directory. Existing indexed digests are reused;
+different paths and versions with identical bytes share one object. Empty assets
+are supported. Many unique tiny assets still cost one remote object each; use
+ordinary Git storage for those files, where pack files aggregate them efficiently.
 
 When a missing local object is needed for a new destination, the helper attempts
-to recover it from configured `gdrive://` fetch URLs and Drive roots remembered
-by previous fetches. Remote manifests are reused within that transfer batch.
+to recover it from configured `gdrive://` and `gdrive-local://` fetch URLs, plus
+Drive roots or local URLs remembered by previous fetches. Only user-selected
+remote URLs can introduce local filesystem paths. Remote manifests are reused
+within that transfer batch.
 All required uploads must finish before pack/manifest publication can update
 refs. Failures leave published refs unchanged; already uploaded candidates may
 become orphans. Dry-run performs no asset uploads. The conditional manifest
@@ -89,12 +92,13 @@ publication to fail, rather than dropping entries.
 
 ## Fetch, clone, and checkout
 
-Fetch transfers Git packs and remembers the validated remote root locally; it
+Fetch transfers Git packs and remembers the validated remote source locally; it
 does not eagerly download all asset history. Smudge restores a pointer from
-verified cache content or downloads it through the same authenticated Drive
-store. Remote lookup uses configured fetch URLs and remembered root IDs, never
-URLs supplied inside pointers. Different OAuth clients can resolve the same
-public repository metadata using their own authorized Drive access.
+verified cache content or downloads it through the matching Drive or local Store.
+Remote lookup uses configured fetch URLs and remembered Drive roots/local URLs,
+never locations supplied inside pointers or downloaded manifests. Different
+OAuth clients can resolve the same public Drive repository metadata using their
+own authorized access.
 
 Install globally before clone, or clone with `--no-checkout`, install locally,
 then run `git checkout HEAD -- .`. Without installed filters, Git leaves pointers
@@ -108,6 +112,8 @@ committed pointers; `git archive` does not invoke smudge. Assets themselves are
 required repository content, so their uploads precede refs. ZIP export failure
 continues to warn without rolling back a successful push.
 
-Only `gdrive://` pushes transfer these assets. Pushing pointer commits to other
+Both `gdrive://` and `gdrive-local://` pushes transfer required assets through
+their selected Store before refs are published. Pushing pointer commits to other
 Git transports does not upload asset content. This implementation provides no
-LFS HTTP server, history migration command, automatic build step, or file locking.
+LFS HTTP server, history migration command, automatic build step, or Git LFS-style
+asset locking.

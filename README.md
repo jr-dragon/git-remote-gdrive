@@ -9,6 +9,13 @@ provides browser OAuth authentication and a remote helper for clone, fetch, and 
 Use `gdrive-local:///absolute/path` for a folder remote without OAuth or Drive API
 access, then transfer that folder yourself or with Drive for desktop.
 
+Detailed specifications:
+
+- [Drive storage and publication](docs/storage.md)
+- [Portable local storage](docs/storage-local.md)
+- [Optional gdrive-assets](docs/assets.md)
+- [Drive backend comparison](docs/drive-backends.md)
+
 ## Install
 
 With the Go version specified in `go.mod`:
@@ -67,6 +74,32 @@ a local remote does **not** make it readable via `gdrive://`, and downloading an
 API remote does not convert it. Migrate from a Git checkout with the required
 history/assets available: add a fresh destination remote and push the desired
 branches and tags. See [local storage format](docs/storage-local.md).
+
+## Choose the Drive API backend
+
+All three implementations share credentials, repository format, and ref
+publication rules. Select one for a command or export the variable for
+subsequent Git commands (including asset filters):
+
+```sh
+GIT_GDRIVE_API_BACKEND=http git clone gdrive://FOLDER_ID project-http
+GIT_GDRIVE_API_BACKEND=sdkv2 git clone gdrive://FOLDER_ID project-sdkv2
+GIT_GDRIVE_API_BACKEND=sdkv3 git clone gdrive://FOLDER_ID project-sdkv3
+GIT_GDRIVE_API_BACKEND=sdkv3 git push origin main
+```
+
+`sdkv3` is the default when `GIT_GDRIVE_API_BACKEND` is unset or empty.
+`http` uses the existing Drive v2 HTTP implementation.
+`sdkv2` uses `google.golang.org/api/drive/v2`; `sdkv3` uses
+`google.golang.org/api/drive/v3`. Both SDKs use native media uploads. The old
+`sdk` value has been renamed to `sdkv2` and is no longer accepted. Unknown
+values are errors; there is no automatic fallback. On PowerShell use
+`$env:GIT_GDRIVE_API_BACKEND = 'sdkv3'` before running Git. This choice does not
+affect local-folder operations or grant additional Workspace permissions.
+
+Run `make benchmark-drive` for a repeatable local comparison. See
+[backend comparison](docs/drive-backends.md) for architecture, upload/retry
+differences, measurement limits, and commands to compare real repositories.
 
 ## Google OAuth setup
 
@@ -141,10 +174,11 @@ go test -race ./...
 go vet ./...
 ```
 
-Tests use local mock OAuth/Drive endpoints and temporary repositories. Integration
-tests execute real Git commands against the mock Drive server, including push,
-clone, fetch, concurrent initialization, corruption, interrupted upload, and
-compaction. They do not contact Google or use real credentials.
+Tests use local mock OAuth/Drive endpoints, filesystem remotes, and temporary
+repositories. Integration tests execute real Git commands against every Drive API
+backend and the local backend, covering push, clone, fetch, assets, ZIP exports,
+concurrent initialization, corruption, interrupted upload, backend interoperability,
+and compaction. They do not contact Google or use real credentials.
 
 ## Use a Drive repository
 
@@ -208,9 +242,10 @@ after the remote-helper phase.
 ## Optional large assets
 
 Use `gdrive-assets` to version binaries or libraries with small Git pointers and
-store their actual content on Drive. This is optional; ordinary repositories need
-no filter setup. It follows Git's [clean/smudge filter mechanism](https://git-scm.com/docs/gitattributes),
-with its own pointer format and Drive storage, and does not require Git LFS.
+store their actual content in the selected `gdrive://` or `gdrive-local://`
+remote. This is optional; ordinary repositories need no filter setup. It follows
+Git's [clean/smudge filter mechanism](https://git-scm.com/docs/gitattributes),
+with its own pointer and storage format, and does not require Git LFS.
 
 Inside the repository, install the filters:
 
@@ -239,7 +274,7 @@ history is preserved and is not rewritten.
 
 `git add` caches content locally and stages a SHA-256/size pointer. Push uploads
 missing assets, including versions needed by historical commits, before publishing
-refs. Identical bytes reuse one Drive object within the repository. Missing or
+refs. Identical bytes reuse one remote object within the repository. Missing or
 failed asset uploads fail the push without updating refs. The usual ZIP export
 still runs after refs commit; ZIP entries contain the committed pointers.
 
@@ -343,17 +378,21 @@ local object store. Downloads are verified before import with `git index-pack
 --strict`; object connectivity is checked before success. Objects are never
 uploaded as individual loose files.
 
-Uploads use resumable sessions with 8 MiB chunks and query the acknowledged offset
-after interrupted requests. Requests retry HTTP 429, retryable HTTP 403 rate-limit
+The HTTP backend uses resumable sessions with 8 MiB chunks and queries
+the acknowledged offset after interrupted requests. Both SDK backends use multipart
+uploads below 8 MiB and native SDK resumable uploads for larger files; see the
+[backend comparison](docs/drive-backends.md). Requests retry HTTP 429, retryable HTTP 403 rate-limit
 responses, selected HTTP 5xx failures, and connection errors with bounded
 exponential backoff, jitter, and `Retry-After`. Permission and storage-quota errors
 fail immediately. Generated file IDs make retried creation idempotent.
 
 Publishing happens after the pack and manifest uploads finish. The helper rereads
-the root pointer and uses its Drive v2 ETag in an `If-Match` metadata patch. A stale
+the root pointer and uses its ETag in an `If-Match` metadata patch. A stale
 snapshot or HTTP 412 rejects the push, including a force push; fetch and retry.
 The patch publishes the directory and manifest IDs together. A missing ETag fails
-closed. The client uses Drive v2 because its file metadata exposes ETags.
+closed. The v2 backends read the JSON ETag; `sdkv3` reads the file GET response header.
+If that header is absent, v3 refuses conditional writes. Live Drive conditional
+updates still require opt-in verification.
 
 Current limitations and costs:
 

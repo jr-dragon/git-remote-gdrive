@@ -39,7 +39,11 @@ func authenticatedStore(ctx context.Context, root string) (repository.Store, err
 	if err != nil {
 		return nil, err
 	}
-	return &drive.Store{Client: drive.NewClient(client), Root: root}, nil
+	api, err := drive.ConfiguredAPI(ctx, client)
+	if err != nil {
+		return nil, err
+	}
+	return &drive.Store{Client: api, Root: root}, nil
 }
 
 func Run(ctx context.Context, args []string, input io.Reader, output io.Writer, open OpenStore) error {

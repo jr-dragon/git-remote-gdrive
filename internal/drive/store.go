@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"io"
 	"maps"
-	"net/http"
-	"net/url"
 
 	"github.com/jr-dragon/git-remote-gdrive/internal/repository"
 )
@@ -18,7 +16,7 @@ const directoryKey = "gdrive-repo"
 const manifestKey = "gdrive-manifest"
 
 type Store struct {
-	Client                    *Client
+	Client                    API
 	Root                      string
 	directory                 string
 	archiveDirectories        map[string]string
@@ -31,7 +29,7 @@ func (s *Store) root(ctx context.Context) (file, error) {
 	if !repository.ValidID(s.Root) {
 		return file{}, errors.New("invalid Google Drive folder ID")
 	}
-	f, err := s.Client.metadata(ctx, s.Root)
+	f, err := s.Client.Metadata(ctx, s.Root)
 	if err != nil {
 		return f, err
 	}
@@ -57,7 +55,7 @@ func (s *Store) Load(ctx context.Context) (*repository.Manifest, string, error) 
 	if !repository.ValidID(dir) || !repository.ValidID(version) {
 		return nil, "", errors.New("incomplete repository pointer on Drive folder")
 	}
-	folder, err := s.Client.metadata(ctx, dir)
+	folder, err := s.Client.Metadata(ctx, dir)
 	if err != nil {
 		return nil, "", err
 	}
@@ -109,7 +107,7 @@ func (s *Store) UploadArchive(ctx context.Context, kind, name string, reader io.
 	dir := s.archiveDirectories[kind]
 	if dir == "" {
 		var err error
-		dir, err = s.Client.createNamedFolder(ctx, s.Root, directoryName)
+		dir, err = s.Client.CreateFolder(ctx, s.Root, directoryName)
 		if err != nil {
 			return "", err
 		}
@@ -117,7 +115,7 @@ func (s *Store) UploadArchive(ctx context.Context, kind, name string, reader io.
 		s.checkedArchiveDirectories[kind] = true
 	}
 	if !s.checkedArchiveDirectories[kind] {
-		meta, err := s.Client.metadata(ctx, dir)
+		meta, err := s.Client.Metadata(ctx, dir)
 		if err != nil {
 			return "", err
 		}
@@ -132,20 +130,14 @@ func (s *Store) UploadArchive(ctx context.Context, kind, name string, reader io.
 			if meta.ETag == "" {
 				return "", errors.New("Drive returned no archive directory ETag; refusing an unconditional rename")
 			}
-			patch, _ := json.Marshal(struct {
-				Title string `json:"title"`
-			}{directoryName})
-			res, err := s.Client.request(ctx, "PATCH", s.Client.BaseURL+"/drive/v2/files/"+url.PathEscape(dir)+"?supportsAllDrives=true", patch, http.Header{"Content-Type": {"application/json"}, "If-Match": {meta.ETag}})
-			if res != nil {
-				res.Body.Close()
-			}
+			err := s.Client.Patch(ctx, dir, meta.ETag, File{Title: directoryName})
 			if err != nil {
 				return "", fmt.Errorf("rename branch archive directory: %w", err)
 			}
 		}
 		s.checkedArchiveDirectories[kind] = true
 	}
-	existing, err := s.Client.findArchive(ctx, dir, name)
+	existing, err := s.Client.FindArchive(ctx, dir, name)
 	if err != nil {
 		return "", err
 	}
@@ -154,7 +146,7 @@ func (s *Store) UploadArchive(ctx context.Context, kind, name string, reader io.
 	if err := s.checkArchiveVersion(ctx); err != nil {
 		return "", err
 	}
-	return s.Client.uploadFile(ctx, existing, dir, name, reader, size)
+	return s.Client.UploadFile(ctx, existing, dir, name, reader, size)
 }
 
 func (s *Store) checkArchiveVersion(ctx context.Context) error {
@@ -174,7 +166,7 @@ func (s *Store) ensureDirectory(ctx context.Context) error {
 	if s.directory != "" {
 		return nil
 	}
-	dir, err := s.Client.createFolder(ctx, s.Root)
+	dir, err := s.Client.CreateFolder(ctx, s.Root, repository.DirectoryName)
 	if err != nil {
 		return err
 	}
@@ -186,24 +178,18 @@ func (s *Store) Upload(ctx context.Context, name string, reader io.ReadSeeker, s
 	if err := s.ensureDirectory(ctx); err != nil {
 		return "", err
 	}
-	return s.Client.upload(ctx, s.directory, name, reader, size)
+	return s.Client.UploadFile(ctx, File{}, s.directory, name, reader, size)
 }
 
 func (s *Store) download(ctx context.Context, id string, w io.Writer, limit int64) error {
-	meta, err := s.Client.metadata(ctx, id)
+	meta, err := s.Client.Metadata(ctx, id)
 	if err != nil {
 		return err
 	}
 	if !meta.in(s.directory) || meta.MIME == folderMIME {
 		return errors.New("repository file is outside its storage directory")
 	}
-	res, err := s.Client.request(ctx, "GET", s.Client.BaseURL+"/drive/v2/files/"+url.PathEscape(id)+"?alt=media&supportsAllDrives=true", nil, nil)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-	_, err = io.Copy(w, io.LimitReader(res.Body, limit))
-	return err
+	return s.Client.Download(ctx, id, w, limit)
 }
 
 func (s *Store) Download(ctx context.Context, pack repository.Pack, w io.Writer) error {
@@ -252,13 +238,7 @@ func (s *Store) Publish(ctx context.Context, expected string, m *repository.Mani
 		}
 	}
 	properties = append(properties, property{directoryKey, s.directory, "PUBLIC"}, property{manifestKey, id, "PUBLIC"})
-	patch, _ := json.Marshal(struct {
-		Properties []property `json:"properties"`
-	}{properties})
-	res, err := s.Client.request(ctx, "PATCH", s.Client.BaseURL+"/drive/v2/files/"+url.PathEscape(s.Root)+"?supportsAllDrives=true", patch, http.Header{"Content-Type": {"application/json"}, "If-Match": {root.ETag}})
-	if res != nil {
-		res.Body.Close()
-	}
+	err = s.Client.Patch(ctx, s.Root, root.ETag, File{Properties: properties})
 	if err != nil {
 		// A lost success response followed by 412 is still our successful commit.
 		current, readErr := s.root(ctx)

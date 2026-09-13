@@ -33,7 +33,7 @@ Preserve the specified `git-remote-drive` credential directory name, which diffe
   git remote add origin gdrive://{folder_id}
   ```
 
-- Supports fetching and pushing repository history as implementation progresses. Adding a remote only configures its URL; actual Drive access happens during operations such as clone, fetch, and push.
+- Supports clone, fetch, pull, push, force push, atomic push batches, dry runs, ref deletion, lightweight tags, and annotated tags. Adding a remote only configures its URL; actual Drive access happens during operations such as clone, fetch, and push.
 - Reports missing or unusable credentials with an actionable instruction to run `git gdrive config`.
 
 ### `git-remote-gdrive-local`
@@ -53,6 +53,7 @@ Preserve the specified `git-remote-drive` credential directory name, which diffe
 - Handle protocol line boundaries, command batches, and end-of-input correctly.
 - Validate `gdrive://{folder_id}` URLs before issuing Drive requests.
 - Keep command entry points small and separate authentication, credential persistence, remote-helper protocol handling, and Drive storage concerns into reusable Go packages.
+- Keep Drive operations behind `drive.API`. Preserve the HTTP backend and the official Drive v2/v3 SDK adapters, selected via `GIT_GDRIVE_API_BACKEND=http|sdkv2|sdkv3`. Unset or empty selects `sdkv3` by default. All must share Store validation/CAS behavior and repository compatibility. Compare them with shared mock contracts and benchmarks; never present loopback timing as live Drive performance.
 - For the API backend, preserve `docs/storage.md`: PUBLIC root properties identify the canonical storage directory and immutable manifest; never identify repositories by file names alone. The local backend uses its explicit FORMAT marker and CURRENT file and rejects API-format directories.
 - Publish new refs only after successful object and manifest uploads, using the expected manifest version and a conditional root metadata update. Never replace this with an unconditional write, even for force pushes.
 - Keep the active incremental pack chain bounded. Retain previous snapshots and packs until a separate, safe garbage-collection design is implemented.
@@ -60,6 +61,15 @@ Preserve the specified `git-remote-drive` credential directory name, which diffe
 - Only after refs are successfully published, upload branch/tag ZIP snapshots to root-level `branches/` and `tags/` folders. Use fixed percent-encoded ref names ending in `.zip` and overwrite an existing same-name ZIP in place. Use the exact published destination ref object, then save folder/archive IDs in a separate conditional manifest update that preserves current refs. ZIP or ZIP-metadata failures must warn on stderr without failing or rolling back the already-successful Git push. ZIPs are mutable convenience exports; only packs and manifests retain immutable history. Ref deletion leaves the last ZIP in place.
 - Preserve Git object integrity and ref consistency. Account for interrupted transfers and concurrent writers when designing updates; do not report success for an incomplete operation.
 - Keep operations scoped to the selected repository folder and avoid modifying unrelated Drive files.
+
+## Current Package Boundaries
+
+- `internal/remotehelper` owns protocol framing, capability/option handling, ref validation, push ordering, and progress task setup.
+- `internal/repository` owns manifests, Git object validation, pack generation/import, asset reachability, and ZIP generation.
+- `internal/drive` owns the shared Drive API interface, the `http`, `sdkv2`, and `sdkv3` adapters, retry/upload behavior, Drive identity checks, and conditional publication.
+- `internal/localstore` implements the portable filesystem Store and must remain independent of OAuth and Drive API code.
+- `internal/assets` and `internal/gdriveassets` own canonical pointers, verified caching, filter installation, and lazy asset recovery.
+- `internal/googleauth` and `internal/browser` own OAuth, credential refresh/persistence, and browser launch behavior.
 
 ## Credentials
 

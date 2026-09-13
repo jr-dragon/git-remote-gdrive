@@ -3,6 +3,11 @@
 This describes the API backend. The portable `gdrive-local://` backend is specified
 in [local storage](storage-local.md).
 
+`drive.Store` depends on the `drive.API` interface. The HTTP client and
+the official Drive v2/v3 SDK adapters implement it and share this storage contract.
+Select with `GIT_GDRIVE_API_BACKEND=http|sdkv2|sdkv3` (default: `sdkv3`);
+see [backend comparison](drive-backends.md).
+
 ## Discovery and identity
 
 The URL is exactly `gdrive://<folder-id>`. The selected folder is the repository
@@ -23,6 +28,12 @@ The directory must be a direct child of the selected root. Manifest, pack, and
 v2 asset files must be direct children of that directory.
 The `gdrive-format=1` property identifies the directory layout; the manifest's
 `version` controls required reader/writer features.
+
+The default `sdkv3` adapter maps these shared properties to Drive v3
+`properties`; it maps PRIVATE properties to `appProperties`. The v2 adapters use
+the v2 property list and preserve visibility explicitly. All adapters expose the
+same project-owned metadata types to `drive.Store`, so switching backends does
+not migrate or rewrite repository data.
 
 Optional `archive_directories` in the manifest maps `branch` and `tags` to their
 Drive folder IDs. The `branch` key is retained for compatibility and identifies
@@ -211,8 +222,8 @@ reader-retention/recovery design and is deliberately not performed by pushes.
 5. Upload the new pack, if any, and the immutable ref manifest with generated IDs.
 6. Read the root again. If its current pointer differs from the expected version,
    reject the push. Preserve unrelated custom properties.
-7. Patch both root pointers with `If-Match: <current root ETag>` using Drive v2
-   metadata. HTTP 412 is a concurrent-write conflict; no unconditional fallback
+7. Patch both root pointers with `If-Match: <current root ETag>` using the selected
+   Drive API backend. HTTP 412 is a concurrent-write conflict; no unconditional fallback
    is allowed. Missing ETags reject the write.
 8. Confirm ref publication. If the response was lost, reread the
    pointer: observing this attempt's unique manifest ID confirms its publication.
@@ -229,19 +240,28 @@ relaxes ancestry checks, never the publication precondition. Pack uploads and ol
 manifests are immutable, so stale Git readers retain a consistent object/ref snapshot;
 ZIP convenience exports are overwritten independently as described above.
 
-Resumable uploads use 8 MiB chunks (a multiple of 256 KiB), status probes after
+The HTTP backend's resumable uploads use 8 MiB chunks (a multiple of 256 KiB), status probes after
 interruptions, and server-reported acknowledged offsets. Expired sessions and
 exhausted retries fail a pack/ref operation before commit, or warn for ZIP work
 after commit. A later ref update starts a fresh failed-export attempt.
+Both SDK backends use multipart below 8 MiB and native SDK resumable uploads at or
+above that size. Their chunk retry policy differs; see the backend comparison.
 Retryable rate limits and server errors use exponential backoff plus jitter.
 Retries are bounded, cancellation is honored, and HTTP clients have timeouts.
+
+All creates use a generated file ID before uploading. This keeps whole-operation
+retries idempotent: a lost successful response cannot silently create a second
+pack, manifest, asset, directory, or ZIP. SDK uploads that still return an error
+verify the generated/existing ID, parent, name, MIME type, size, and SHA-256 before
+accepting a lost response as success.
 
 ## References and verification boundary
 
 - [Drive custom properties](https://developers.google.com/workspace/drive/api/guides/properties)
   explains shared properties and their size limits.
 - [Drive v2 file metadata](https://developers.google.com/workspace/drive/api/reference/rest/v2/files)
-  exposes the file ETag used for conditional publication.
+  exposes the JSON file ETag used by v2 backends. The v3 adapter reads the
+  file GET response ETag header instead and rejects conditional writes if absent.
 - [Drive resumable uploads](https://developers.google.com/workspace/drive/api/guides/manage-uploads)
   defines chunks, status probes, and interrupted upload handling.
 - [Drive error handling](https://developers.google.com/workspace/drive/api/guides/handle-errors)

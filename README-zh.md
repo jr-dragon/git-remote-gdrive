@@ -7,6 +7,13 @@
 透過 `gdrive://{folder_id}` 將 Google Drive 作為 Git 遠端儲存庫。本專案提供瀏覽器 OAuth 認證，以及支援 clone、fetch 與 push 的遠端輔助程式（remote helper）。
 也可以使用 `gdrive-local:///absolute/path`，在無需 OAuth 或 Drive API 的情況下將本地資料夾作為 remote，再自行傳輸或使用 Google Drive 電腦版同步。
 
+詳細規格：
+
+- [Drive 儲存格式與發布流程](docs/storage.md)
+- [本地可攜儲存格式](docs/storage-local.md)
+- [選用的 gdrive-assets](docs/assets.md)
+- [Drive 後端比較](docs/drive-backends.md)
+
 ## 安裝
 
 使用 `go.mod` 指定的 Go 版本執行：
@@ -44,6 +51,21 @@ git push origin main
 跨電腦協作時，必須協調**同一時間只有一位寫入者**：fetch/pull 前先完成下載，push 後先完成上傳，再交給下一位使用者。使用 Google Drive 電腦版時，請將資料夾設為可離線使用。本地鎖與版本檢查能保護共用同一本地檔案系統的程序，無法鎖定各台電腦獨立同步的副本。若 `CURRENT` 發生同步衝突，請保留雙方副本、透過 Git 整合歷史後，再發布完整資料夾。缺少物件或指標時會回報錯誤，不會自動選擇較舊 manifest。
 
 本地可攜格式與 API 後端的 Drive ID／自訂屬性格式不同：上傳本地 remote **不會**使其支援 `gdrive://`，下載 API remote 也不會自動轉換。遷移時，請從已取得所需歷史與 assets 的 Git checkout，新增空白目的地 remote，再 push 所需 branches 與 tags。詳見[本地儲存格式](docs/storage-local.md)。
+
+## 選擇 Drive API 後端
+
+三種實作共用 credential、repository 格式與 refs 發布規則。可以針對單次指令設定，或 export 環境變數套用至後續 Git 指令及 asset filters：
+
+```sh
+GIT_GDRIVE_API_BACKEND=http git clone gdrive://FOLDER_ID project-http
+GIT_GDRIVE_API_BACKEND=sdkv2 git clone gdrive://FOLDER_ID project-sdkv2
+GIT_GDRIVE_API_BACKEND=sdkv3 git clone gdrive://FOLDER_ID project-sdkv3
+GIT_GDRIVE_API_BACKEND=sdkv3 git push origin main
+```
+
+未設定 `GIT_GDRIVE_API_BACKEND` 或其值為空時，預設使用 `sdkv3`。`http` 使用原有 Drive v2 HTTP 實作；`sdkv2` 使用 `google.golang.org/api/drive/v2`；`sdkv3` 使用 `google.golang.org/api/drive/v3`。兩種 SDK 都採用原生上傳機制。原本的 `sdk` 已更名為 `sdkv2`，不再接受舊值。未知值會回報錯誤，不會自動切換後端。PowerShell 請先設定 `$env:GIT_GDRIVE_API_BACKEND = 'sdkv3'` 再執行 Git。此選項不影響本地資料夾的操作，也不會增加 Workspace 權限。
+
+執行 `make benchmark-drive` 可重跑本地比較。架構、上傳／重試差異、測量限制與真實 repository 的比較方式，請參考[後端比較文件](docs/drive-backends.md)。
 
 ## Google OAuth 設定
 
@@ -97,7 +119,7 @@ go test -race ./...
 go vet ./...
 ```
 
-測試使用本機模擬的 OAuth／Drive 端點與臨時儲存庫。整合測試會對模擬 Drive 伺服器執行真正的 Git 指令，涵蓋 push、clone、fetch、並行初始化、資料損毀、上傳中斷與 pack 整併。測試不會連線至 Google，也不會使用真實憑證。
+測試使用本機模擬的 OAuth／Drive 端點、檔案系統 remote 與臨時儲存庫。整合測試會針對每個 Drive API 後端與本地後端執行真正的 Git 指令，涵蓋 push、clone、fetch、assets、ZIP 匯出、並行初始化、資料損毀、上傳中斷、後端互通性與 pack 整併。測試不會連線至 Google，也不會使用真實憑證。
 
 ## 使用 Drive 儲存庫
 
@@ -137,7 +159,7 @@ git pull --progress
 
 ## 可選的大型資產管理
 
-使用 `gdrive-assets`，可以透過小型 Git 指標檔（pointer）對執行檔或函式庫進行版本控制，並將實際內容儲存在 Drive。這是可選功能；一般儲存庫不需要設定 filter。它採用 Git 的 [clean/smudge filter 機制](https://git-scm.com/docs/gitattributes)，使用自己的 pointer 格式與 Drive 儲存方式，不需要安裝 Git LFS。
+使用 `gdrive-assets`，可以透過小型 Git 指標檔（pointer）對執行檔或函式庫進行版本控制，並將實際內容儲存在所選的 `gdrive://` 或 `gdrive-local://` remote。這是可選功能；一般儲存庫不需要設定 filter。它採用 Git 的 [clean/smudge filter 機制](https://git-scm.com/docs/gitattributes)，使用自己的 pointer 與儲存格式，不需要安裝 Git LFS。
 
 在儲存庫內安裝 filter：
 
@@ -161,7 +183,7 @@ git push origin HEAD
 
 `.gitignore` 仍然適用：如果要對被忽略的 asset 進行版本控制，請明確使用 `git add -f`。對於設定 filter 前就已被追蹤的檔案，請使用 `git add --renormalize -- path/to/asset` 並提交轉換結果。既有歷史會保留，不會被改寫。
 
-`git add` 會在本機快取內容，並將包含 SHA-256 與大小的 pointer 加入暫存區。Push 會先上傳遠端尚未儲存的 assets，包括歷史 commits 所需的版本，再發布 refs。同一儲存庫內，位元組內容相同的檔案會共用一個 Drive 物件。若 asset 內容缺失或上傳失敗，push 會失敗，且不會更新 refs。原有的 ZIP 匯出仍會在 refs 提交成功後執行；ZIP 中的對應項目會包含已提交的 pointers。
+`git add` 會在本機快取內容，並將包含 SHA-256 與大小的 pointer 加入暫存區。Push 會先上傳遠端尚未儲存的 assets，包括歷史 commits 所需的版本，再發布 refs。同一儲存庫內，位元組內容相同的檔案會共用一個遠端物件。若 asset 內容缺失或上傳失敗，push 會失敗，且不會更新 refs。原有的 ZIP 匯出仍會在 refs 提交成功後執行；ZIP 中的對應項目會包含已提交的 pointers。
 
 每位協作者都必須在自己的電腦上安裝 filter。若要在 clone 前，為各儲存庫中符合規則的路徑啟用 filter：
 
@@ -214,9 +236,9 @@ Drive 不支援跨檔案交易：ZIP 可能暫時落後於 refs，或缺少已�
 
 每次 push 最多上傳一個非 thin 的增量 pack，包含無法從先前 refs 到達的物件。當目前使用的 pack 鏈已有 16 個 packs，下一次 push 會寫入完整 pack 並取代該 pack 鏈。Clone／fetch 會下載該快照所需的 packs，並重複使用 Git 本機物件儲存區中已有的 packs。下載內容會經過驗證，再使用 `git index-pack --strict` 匯入；回報成功前，也會檢查物件連通性。物件不會以個別鬆散檔案的形式上傳。
 
-上傳使用可續傳工作階段，以 8 MiB 為區塊傳送，並在請求中斷後查詢伺服器已確認的位移。對於 HTTP 429、可重試的 HTTP 403 速率限制回應、特定 HTTP 5xx 錯誤與連線錯誤，請求會使用有次數上限的指數退避、隨機延遲與 `Retry-After` 進行重試。權限與儲存配額錯誤會立即失敗。預先產生的檔案 ID 可讓重試建立檔案時保持冪等性。
+HTTP 後端使用可續傳工作階段，以 8 MiB 為區塊傳送，並在請求中斷後查詢伺服器已確認的位移。兩種 SDK 後端對小於 8 MiB 的檔案使用 multipart，其餘使用 SDK 原生可續傳上傳；詳見[後端比較](docs/drive-backends.md)。對於 HTTP 429、可重試的 HTTP 403 速率限制回應、特定 HTTP 5xx 錯誤與連線錯誤，請求會使用有次數上限的指數退避、隨機延遲與 `Retry-After` 進行重試。權限與儲存配額錯誤會立即失敗。預先產生的檔案 ID 可讓重試建立檔案時保持冪等性。
 
-Pack 與 manifest 上傳完成後才會發布。輔助程式會重新讀取根資料夾的指標，並在中繼資料 PATCH 請求的 `If-Match` 中使用其 Drive v2 ETag。過期的快照或 HTTP 412 會使 push 被拒絕，即使是強制推送也一樣；請先 fetch 再重試。此 PATCH 請求會一併發布目錄與 manifest ID。如果缺少 ETag，程式會拒絕更新。用戶端使用 Drive v2，因為其檔案中繼資料提供 ETag。
+Pack 與 manifest 上傳完成後才會發布。輔助程式會重新讀取根資料夾的指標，並在中繼資料 PATCH 請求的 `If-Match` 中使用其 ETag。過期的快照或 HTTP 412 會使 push 被拒絕，即使是強制推送也一樣；請先 fetch 再重試。此 PATCH 請求會一併發布目錄與 manifest ID。如果缺少 ETag，程式會拒絕更新。v2 後端從 JSON 讀取 ETag；`sdkv3` 從檔案 GET 回應的 header 讀取。若缺少該 header，v3 會拒絕條件式寫入。真實 Drive 的條件式更新仍須透過明確啟用的測試驗證。
 
 目前的限制與成本：
 

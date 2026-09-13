@@ -22,27 +22,32 @@ import (
 const folderMIME = "application/vnd.google-apps.folder"
 const chunkSize int64 = 8 << 20
 
-type property struct {
+type Property struct {
 	Key        string `json:"key"`
 	Value      string `json:"value"`
 	Visibility string `json:"visibility"`
 }
-type parent struct {
+type Parent struct {
 	ID string `json:"id"`
 }
-type file struct {
+type File struct {
 	ID         string     `json:"id,omitempty"`
 	Title      string     `json:"title,omitempty"`
 	MIME       string     `json:"mimeType,omitempty"`
 	ETag       string     `json:"etag,omitempty"`
-	Parents    []parent   `json:"parents,omitempty"`
-	Properties []property `json:"properties,omitempty"`
+	Parents    []Parent   `json:"parents,omitempty"`
+	Properties []Property `json:"properties,omitempty"`
 	Labels     struct {
 		Trashed bool `json:"trashed"`
 	} `json:"labels,omitempty"`
 }
 
-func (f file) value(key string) string {
+// Internal aliases keep the original HTTP codec independent of the SDK types.
+type file = File
+type property = Property
+type parent = Parent
+
+func (f File) value(key string) string {
 	for _, p := range f.Properties {
 		if p.Key == key && p.Visibility == "PUBLIC" {
 			return p.Value
@@ -50,7 +55,7 @@ func (f file) value(key string) string {
 	}
 	return ""
 }
-func (f file) in(parentID string) bool {
+func (f File) in(parentID string) bool {
 	for _, p := range f.Parents {
 		if p.ID == parentID {
 			return true
@@ -203,10 +208,6 @@ func (c *Client) generateID(ctx context.Context) (string, error) {
 	return result.IDs[0], nil
 }
 
-func (c *Client) createFolder(ctx context.Context, root string) (string, error) {
-	return c.createNamedFolder(ctx, root, "@.git-remote-gdrive")
-}
-
 func (c *Client) createNamedFolder(ctx context.Context, root, name string) (string, error) {
 	id, err := c.generateID(ctx)
 	if err != nil {
@@ -228,10 +229,6 @@ func (c *Client) createNamedFolder(ctx context.Context, root, name string) (stri
 		return "", errors.New("created repository directory is invalid")
 	}
 	return id, nil
-}
-
-func (c *Client) upload(ctx context.Context, dir, name string, reader io.ReadSeeker, size int64) (string, error) {
-	return c.uploadFile(ctx, file{}, dir, name, reader, size)
 }
 
 // findArchive looks only inside the canonical archive directory. A name search
@@ -281,7 +278,7 @@ func (c *Client) findArchive(ctx context.Context, dir, name string) (file, error
 	}
 }
 
-func (c *Client) uploadFile(ctx context.Context, existing file, dir, name string, reader io.ReadSeeker, size int64) (uploadedID string, err error) {
+func uploadLabel(name string) string {
 	label := "Uploading " + name
 	if strings.HasSuffix(name, ".pack") {
 		label = "Uploading Git pack"
@@ -293,7 +290,11 @@ func (c *Client) uploadFile(ctx context.Context, existing file, dir, name string
 	if strings.HasSuffix(name, ".zip") {
 		label = "Uploading ZIP " + name
 	}
-	transfer := progress.Start(ctx, label, size)
+	return label
+}
+
+func (c *Client) uploadFile(ctx context.Context, existing file, dir, name string, reader io.ReadSeeker, size int64) (uploadedID string, err error) {
+	transfer := progress.Start(ctx, uploadLabel(name), size)
 	defer func() { transfer.Finish(err) }()
 	id := existing.ID
 	method, endpoint := "POST", c.BaseURL+"/upload/drive/v2/files?uploadType=resumable&supportsAllDrives=true"

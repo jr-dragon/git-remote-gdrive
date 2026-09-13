@@ -40,7 +40,11 @@ func run(ctx context.Context, args []string, input io.Reader, output io.Writer) 
 		if err != nil {
 			return nil, err
 		}
-		return &drive.Store{Client: drive.NewClient(client), Root: id}, nil
+		api, err := drive.ConfiguredAPI(ctx, client)
+		if err != nil {
+			return nil, err
+		}
+		return &drive.Store{Client: api, Root: id}, nil
 	}}
 	return h.Run(ctx, input, output)
 }

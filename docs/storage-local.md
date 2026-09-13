@@ -2,7 +2,8 @@
 
 `git-remote-gdrive-local` reuses the remote-helper protocol and repository logic
 with a filesystem Store. No credentials, browser, or Google API is needed.
-Select an existing directory outside the Git worktree with an absolute URL:
+The root directory must already exist and should be outside the Git worktree.
+Select it with an absolute URL:
 `gdrive-local:///home/me/remote` or `gdrive-local:///C:/Users/me/remote` on Windows.
 Quote spaces and percent-encode reserved URL characters. Relative paths, URL
 authorities, queries, fragments, and UNC paths are rejected.
@@ -39,6 +40,11 @@ No absolute local paths or Drive IDs are embedded. The manifest ID verifies its
 JSON bytes. Readers require all indexed packs/assets to exist with declared sizes;
 downloads verify content hashes and Git verifies/indexes packs. Missing data fails
 with an instruction to finish copying/syncing.
+
+The filename passed by repository logic (`pack-*.pack`, `manifest.json`, or
+`asset-sha256-*`) is only a progress label. Immutable local objects are always
+stored by content ID, so identical bytes are reused and portable manifests never
+depend on descriptive filenames.
 
 Archive directory IDs are `branches` and `tags` (the logical key remains `branch`).
 ZIP IDs are a stable hash of their relative directory/name. ZIP names use the API
@@ -81,6 +87,8 @@ Do not let conflict resolution arbitrarily choose CURRENT.
 The optional filters work unchanged via `git gdrive install` and `.gitattributes`.
 Local asset URLs selected by the user are remembered in the Git cache for
 literal-URL fetches; downloaded manifests cannot supply filesystem paths.
+Asset content is written into the same content-addressed object directory before
+refs publish, and checkout retrieves it lazily through the local Store.
 
 API repositories depend on Google-managed IDs and PUBLIC properties that ordinary
 upload/download does not preserve. Uploading this folder does not enable
