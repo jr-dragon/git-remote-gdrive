@@ -1,4 +1,4 @@
-# Drive repository format v1
+# Drive repository formats v1 and v2
 
 ## Discovery and identity
 
@@ -16,8 +16,10 @@ Two PUBLIC custom properties on the root define the current repository:
 The directory is named `@.git-remote-gdrive` and has PUBLIC property
 `gdrive-format=1`. PUBLIC properties are shared across OAuth applications that
 have permission to access the file; they do not grant access to Drive contents.
-The directory must be a direct child of the selected root. Manifest and pack
-files must be direct children of that directory.
+The directory must be a direct child of the selected root. Manifest, pack, and
+v2 asset files must be direct children of that directory.
+The `gdrive-format=1` property identifies the directory layout; the manifest's
+`version` controls required reader/writer features.
 
 Optional `archive_directories` in the manifest maps `branch` and `tags` to their
 Drive folder IDs. These named folders are direct children of the selected root,
@@ -86,6 +88,13 @@ ZIP ID, ref object ID, size, and digest. Its `oid` must equal the corresponding
 entry in `refs`; directory IDs must be distinct from the repository root, storage
 directory, and each other. Legacy writers do not preserve these fields, so use
 updated helpers for pushes once ZIP snapshots are needed.
+
+Manifest v2 adds a required-to-preserve `assets` index, mapping SHA-256 digests to
+`{"id":"DRIVE_FILE_ID","size":123}` descriptors. A first push containing asset
+pointers upgrades v1 to v2. v1 cannot contain a nonempty asset index, and a v2
+repository never automatically downgrades. Older helpers reject v2 instead of
+silently losing required data. Descriptors are retained across ref deletion and
+force pushes. See [gdrive-assets](assets.md) for the pointer and cache format.
 
 ## Branch and tag ZIP snapshots
 
@@ -182,7 +191,10 @@ reader-retention/recovery design and is deliberately not performed by pushes.
 2. Load the immutable manifest and hydrate its packs locally as needed.
 3. Validate the entire push batch. Dry-run stops before remote writes.
 4. Remove stale archive mappings for changed/deleted refs, preserving unchanged
-   mappings. If uninitialized, create a candidate storage directory.
+   mappings. Scan reachable history for gdrive-assets pointers and upload missing
+   immutable asset objects. Update the asset index and use manifest v2 when
+   assets are present. Asset failures stop the push before publication. If
+   uninitialized, uploads create a candidate storage directory.
 5. Upload the new pack, if any, and the immutable ref manifest with generated IDs.
 6. Read the root again. If its current pointer differs from the expected version,
    reject the push. Preserve unrelated custom properties.

@@ -16,6 +16,7 @@ The project must provide two binaries available on the user's `PATH`:
 - `git gdrive config` opens the user's browser to perform OAuth authentication with Google.
 - After successful authentication, saves the user's credentials to `~/.config/git-remote-drive/credential`.
 - Shares credential loading and refresh logic with `git-remote-gdrive`.
+- `git gdrive install` optionally installs repository-local gdrive-assets clean/smudge filters; `--global` supports setup before cloning. `.gitattributes` selects files with `filter=gdrive-assets`. Never silently install filters or rewrite attributes during ordinary clone/fetch/push.
 
 Preserve the specified `git-remote-drive` credential directory name, which differs from the project name.
 
@@ -46,6 +47,7 @@ Preserve the specified `git-remote-drive` credential directory name, which diffe
 - Preserve the storage contract in `docs/storage.md`: PUBLIC root properties identify the canonical `@.git-remote-gdrive` directory and immutable manifest; never identify repositories by file names alone.
 - Publish new refs only after successful object and manifest uploads, using the expected manifest version and a conditional root metadata update. Never replace this with an unconditional write, even for force pushes.
 - Keep the active incremental pack chain bounded. Retain previous snapshots and packs until a separate, safe garbage-collection design is implemented.
+- Optional gdrive-assets use canonical SHA-256 pointers and a verified cache in the Git common directory. Upload all missing assets reachable through pushed history before publishing refs, and retain the complete asset index. Asset failures fail the push before ref publication. Repositories with assets require manifest v2 so older helpers reject them; repositories without assets remain v1. Checkout downloads are lazy and must verify size and SHA-256 before emitting bytes. See `docs/assets.md`.
 - Only after refs are successfully published, upload branch/tag ZIP snapshots to root-level `branch/` and `tags/` folders. Use fixed percent-encoded ref names ending in `.zip` and overwrite an existing same-name ZIP in place. Use the exact published destination ref object, then save folder/archive IDs in a separate conditional manifest update that preserves current refs. ZIP or ZIP-metadata failures must warn on stderr without failing or rolling back the already-successful Git push. ZIPs are mutable convenience exports; only packs and manifests retain immutable history. Ref deletion leaves the last ZIP in place.
 - Preserve Git object integrity and ref consistency. Account for interrupted transfers and concurrent writers when designing updates; do not report success for an incomplete operation.
 - Keep operations scoped to the selected repository folder and avoid modifying unrelated Drive files.

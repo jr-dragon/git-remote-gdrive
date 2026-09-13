@@ -1,5 +1,7 @@
 # git-remote-gdrive
 
+[English](README.md) | [繁體中文](README-zh.md)
+
 [![Testing](https://github.com/jr-dragon/git-remote-gdrive/actions/workflows/testing.yml/badge.svg)](https://github.com/jr-dragon/git-remote-gdrive/actions/workflows/testing.yml)
 
 Use Google Drive as a Git remote through `gdrive://{folder_id}`. The project
@@ -15,7 +17,7 @@ go install ./git-gdrive ./git-remote-gdrive
 
 Add your Go binary installation directory to `PATH`. Alternatively, run `make build`
 and add the resulting `build/` directory to `PATH`. Both binaries and Git itself
-must be available: `git-gdrive` supplies `git gdrive`, while Git invokes
+must be available (Git 2.36 or later): `git-gdrive` supplies `git gdrive`, while Git invokes
 `git-remote-gdrive` automatically for `gdrive://` URLs.
 
 ## Google OAuth setup
@@ -80,6 +82,8 @@ See [Google's native app OAuth documentation](https://developers.google.com/iden
 - `git-remote-gdrive/main.go`: remote-helper entry point.
 - `internal/remotehelper`: Git protocol, ref discovery, and push validation.
 - `internal/repository`: versioned manifests, pack generation, and object verification.
+- `internal/assets`: asset pointers and verified content cache.
+- `internal/gdriveassets`: optional filter installation, clean/smudge commands, and asset retrieval.
 - `internal/drive`: Drive storage, conditional publication, retries, and resumable uploads.
 - `internal/googleauth`: OAuth flow, callback validation, and credential persistence.
 - `internal/browser`: default browser launchers for macOS, Linux, and Windows.
@@ -126,6 +130,70 @@ branch updates and existing tag replacements unless force is requested. The firs
 push chooses the pushed local default branch as remote HEAD when possible;
 otherwise it chooses the first branch in sorted order. HEAD remains stable until
 that branch is deleted, then moves to a remaining branch if one exists.
+
+## Optional large assets
+
+Use `gdrive-assets` to version binaries or libraries with small Git pointers and
+store their actual content on Drive. This is optional; ordinary repositories need
+no filter setup. It follows Git's [clean/smudge filter mechanism](https://git-scm.com/docs/gitattributes),
+with its own pointer format and Drive storage, and does not require Git LFS.
+
+Inside the repository, install the filters:
+
+```sh
+git gdrive install
+```
+
+Add patterns to `.gitattributes` and commit that file with your assets:
+
+```gitattributes
+*.so  filter=gdrive-assets diff=gdrive-assets merge=gdrive-assets -text
+*.dll filter=gdrive-assets diff=gdrive-assets merge=gdrive-assets -text
+dist/** filter=gdrive-assets diff=gdrive-assets merge=gdrive-assets -text
+```
+
+```sh
+git add .gitattributes dist/
+git commit -m "Track release assets"
+git push origin HEAD
+```
+
+`.gitignore` still applies: explicitly use `git add -f` for an ignored asset that
+you intend to version. For files already tracked before filter setup, use
+`git add --renormalize -- path/to/asset` and commit the conversion. Existing
+history is preserved and is not rewritten.
+
+`git add` caches content locally and stages a SHA-256/size pointer. Push uploads
+missing assets, including versions needed by historical commits, before publishing
+refs. Identical bytes reuse one Drive object within the repository. Missing or
+failed asset uploads fail the push without updating refs. The usual ZIP export
+still runs after refs commit; ZIP entries contain the committed pointers.
+
+Each collaborator must install filters on their own machine. To enable them for
+matching paths across repositories before cloning:
+
+```sh
+git gdrive install --global
+git clone gdrive://YOUR_FOLDER_ID
+```
+
+Or keep installation local to the new clone:
+
+```sh
+git clone --no-checkout gdrive://YOUR_FOLDER_ID repo
+cd repo
+git gdrive install
+git checkout HEAD -- .
+```
+
+Checkout downloads assets on demand and verifies their size and SHA-256. Cached
+content works offline. Without installed filters, checkout yields pointers. Set
+`GIT_GDRIVE_SKIP_SMUDGE=1` to explicitly keep pointers with filters installed.
+
+The first asset push upgrades the remote manifest to v2; all collaborators need
+an updated helper for that repository. Repositories that never use assets stay on
+v1. Asset objects and cached content are retained; automatic garbage collection
+is not implemented. See [asset format and behavior](docs/assets.md).
 
 ## Storage format and limits
 

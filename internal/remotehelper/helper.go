@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jr-dragon/git-remote-gdrive/internal/gdriveassets"
 	"github.com/jr-dragon/git-remote-gdrive/internal/repository"
 )
 
@@ -24,13 +25,14 @@ func FolderID(raw string) (string, error) {
 }
 
 type Helper struct {
-	OpenStore   func(context.Context) (repository.Store, error)
-	Diagnostics io.Writer
-	Git         repository.Git
-	store       repository.Store
-	manifest    *repository.Manifest
-	version     string
-	dryRun      bool
+	OpenStore      func(context.Context) (repository.Store, error)
+	Diagnostics    io.Writer
+	Git            repository.Git
+	OpenAssetStore gdriveassets.OpenStore
+	store          repository.Store
+	manifest       *repository.Manifest
+	version        string
+	dryRun         bool
 }
 
 func (h *Helper) load(ctx context.Context) error {
@@ -190,7 +192,10 @@ func (h *Helper) fetch(ctx context.Context, batch []string) error {
 	if err != nil {
 		return err
 	}
-	return g.Hydrate(ctx, h.store, h.manifest)
+	if err := g.Hydrate(ctx, h.store, h.manifest); err != nil {
+		return err
+	}
+	return g.RememberAssetRemote(ctx, h.manifest)
 }
 
 type update struct {
@@ -332,6 +337,10 @@ func (h *Helper) apply(ctx context.Context, updates []update) error {
 	}
 	if h.dryRun {
 		return nil
+	}
+	resolver := gdriveassets.Resolver{Git: g, Open: h.OpenAssetStore}
+	if err := g.UploadAssets(ctx, h.store, &next, resolver.Ensure); err != nil {
+		return err
 	}
 	full := len(next.Packs) >= repository.MaxPacks
 	if len(next.Refs) == 0 {

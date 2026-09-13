@@ -8,6 +8,8 @@ import (
 	"io"
 	"regexp"
 	"strings"
+
+	"github.com/jr-dragon/git-remote-gdrive/internal/assets"
 )
 
 const MaxPacks = 16
@@ -33,6 +35,11 @@ type Archive struct {
 	Size   int64  `json:"size"`
 }
 
+type Asset struct {
+	ID   string `json:"id"`
+	Size int64  `json:"size"`
+}
+
 type Manifest struct {
 	Format             string             `json:"format"`
 	Version            int                `json:"version"`
@@ -45,6 +52,7 @@ type Manifest struct {
 	Packs              []Pack             `json:"packs"`
 	ArchiveDirectories map[string]string  `json:"archive_directories,omitempty"`
 	Archives           map[string]Archive `json:"archives,omitempty"`
+	Assets             map[string]Asset   `json:"assets,omitempty"`
 }
 
 func Empty() *Manifest {
@@ -72,7 +80,7 @@ func ValidRef(ref string) bool {
 }
 
 func (m *Manifest) Validate() error {
-	if m.Format != "git-remote-gdrive" || m.Version != 1 || m.ObjectFormat != "sha1" {
+	if m.Format != "git-remote-gdrive" || (m.Version != 1 && m.Version != 2) || m.ObjectFormat != "sha1" {
 		return errors.New("unsupported repository format")
 	}
 	if !ValidRef(m.HEAD) || !strings.HasPrefix(m.HEAD, "refs/heads/") || m.Refs == nil || len(m.Packs) > MaxPacks {
@@ -95,6 +103,15 @@ func (m *Manifest) Validate() error {
 		}
 	}
 	seen := map[string]bool{}
+	if len(m.Assets) > 0 && m.Version != 2 {
+		return errors.New("assets require repository format v2")
+	}
+	for oid, asset := range m.Assets {
+		if !(assets.Pointer{OID: oid, Size: asset.Size}).Valid() || !ValidID(asset.ID) || seen[asset.ID] || asset.ID == m.Root || asset.ID == m.Directory {
+			return errors.New("invalid asset descriptor")
+		}
+		seen[asset.ID] = true
+	}
 	for _, p := range m.Packs {
 		if !ValidID(p.ID) || !oidPattern.MatchString(p.Hash) || !digestPattern.MatchString(p.SHA256) || p.Size < 32 || seen[p.ID] {
 			return errors.New("invalid pack descriptor")

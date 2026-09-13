@@ -316,6 +316,17 @@ func (c *Client) uploadFile(ctx context.Context, existing file, dir, name string
 	if err != nil || u.Scheme != base.Scheme || u.Host != base.Host || u.User != nil {
 		return "", errors.New("Drive returned an invalid upload session URL")
 	}
+	if size == 0 {
+		response, err := c.request(ctx, "PUT", session, nil, http.Header{"Content-Type": {mimeType}, "Content-Range": {"bytes */0"}})
+		if err != nil {
+			return "", err
+		}
+		defer response.Body.Close()
+		if response.StatusCode != 200 && response.StatusCode != 201 {
+			return "", errors.New("empty upload ended without a completion response")
+		}
+		return id, nil
+	}
 	var offset int64
 	stalled := 0
 	for offset < size {

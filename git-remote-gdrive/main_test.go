@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/jr-dragon/git-remote-gdrive/internal/drive"
+	"github.com/jr-dragon/git-remote-gdrive/internal/gdriveassets"
 	"github.com/jr-dragon/git-remote-gdrive/internal/remotehelper"
 	"github.com/jr-dragon/git-remote-gdrive/internal/repository"
 )
@@ -35,14 +36,26 @@ func TestHelperProcess(t *testing.T) {
 		return
 	}
 	args := os.Args
+	client := drive.NewClient(&http.Client{Timeout: 10 * time.Second})
+	client.BaseURL = os.Getenv("GDRIVE_TEST_URL")
+	open := func(_ context.Context, root string) (repository.Store, error) {
+		return &drive.Store{Client: client, Root: root}, nil
+	}
+	for i, arg := range args {
+		if arg == "--asset-command" {
+			if err := gdriveassets.Run(context.Background(), args[i+1:], os.Stdin, os.Stdout, open); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			os.Exit(0)
+		}
+	}
 	id, err := remotehelper.FolderID(args[len(args)-1])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	client := drive.NewClient(&http.Client{Timeout: 10 * time.Second})
-	client.BaseURL = os.Getenv("GDRIVE_TEST_URL")
-	h := remotehelper.Helper{Diagnostics: os.Stderr, OpenStore: func(context.Context) (repository.Store, error) { return &drive.Store{Client: client, Root: id}, nil }}
+	h := remotehelper.Helper{Diagnostics: os.Stderr, OpenAssetStore: open, OpenStore: func(ctx context.Context) (repository.Store, error) { return open(ctx, id) }}
 	if err := h.Run(context.Background(), os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -80,6 +93,7 @@ type mockDrive struct {
 	conflict            bool
 	failUpload          bool
 	failZIP             bool
+	failAsset           bool
 	failArchiveMetadata bool
 	interruptUpload     bool
 	interruptZIP        bool
@@ -154,6 +168,10 @@ func (d *mockDrive) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if strings.HasPrefix(r.Header.Get("Content-Range"), "bytes */") {
+			if r.Header.Get("Content-Range") == "bytes */0" {
+				u.Complete = true
+				d.files[u.File.ID] = u.File
+			}
 			if u.Complete {
 				json.NewEncoder(w).Encode(u.File)
 				return
@@ -174,6 +192,10 @@ func (d *mockDrive) serve(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, `{"error":"ZIP upload failed"}`)
 			return
 		}
+		if d.failAsset && strings.HasPrefix(u.File.Title, "asset-sha256-") {
+			w.WriteHeader(400)
+			return
+		}
 		var start, end, total int64
 		if _, err := fmt.Sscanf(r.Header.Get("Content-Range"), "bytes %d-%d/%d", &start, &end, &total); err != nil || start != int64(len(u.Bytes)) {
 			w.WriteHeader(400)
@@ -189,6 +211,9 @@ func (d *mockDrive) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		u.Bytes = append(u.Bytes, data...)
 		if int64(len(u.Bytes)) == total {
+			if strings.HasPrefix(u.File.Title, "asset-sha256-") {
+				d.events = append(d.events, "asset")
+			}
 			u.File.Data = u.Bytes
 			if u.File.ETag == "" {
 				u.File.ETag = `"1"`
@@ -317,6 +342,10 @@ func testEnvironment(t *testing.T, d *mockDrive) []string {
 	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
 	wrapper := "#!/bin/sh\nexec " + quote(executable) + " -test.run=^TestHelperProcess$ -- \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(bin, "git-remote-gdrive"), []byte(wrapper), 0700); err != nil {
+		t.Fatal(err)
+	}
+	assetWrapper := "#!/bin/sh\nexec " + quote(executable) + " -test.run=^TestHelperProcess$ -- --asset-command \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "git-gdrive"), []byte(assetWrapper), 0700); err != nil {
 		t.Fatal(err)
 	}
 	var env []string

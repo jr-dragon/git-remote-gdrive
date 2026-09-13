@@ -10,13 +10,18 @@ import (
 	"os/signal"
 
 	"github.com/jr-dragon/git-remote-gdrive/internal/browser"
+	"github.com/jr-dragon/git-remote-gdrive/internal/gdriveassets"
 	"github.com/jr-dragon/git-remote-gdrive/internal/googleauth"
 )
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	if err := run(ctx, os.Args[1:], os.Stdin, os.Stderr); err != nil {
+	var output io.Writer = os.Stderr
+	if len(os.Args) > 1 && (os.Args[1] == "asset-clean" || os.Args[1] == "asset-smudge") {
+		output = os.Stdout
+	}
+	if err := run(ctx, os.Args[1:], os.Stdin, output); err != nil {
 		fmt.Fprintln(os.Stderr, "git-gdrive:", err)
 		os.Exit(1)
 	}
@@ -25,10 +30,14 @@ func main() {
 func run(ctx context.Context, args []string, input io.Reader, output io.Writer) error {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
 		fmt.Fprintln(output, "Usage: git-gdrive config --client-file <desktop-oauth-client.json> [--manual]")
+		fmt.Fprintln(output, "       git-gdrive install [--global]")
 		return nil
 	}
+	if args[0] == "install" || args[0] == "asset-clean" || args[0] == "asset-smudge" {
+		return gdriveassets.Run(ctx, args, input, output, nil)
+	}
 	if args[0] != "config" {
-		return errors.New("unknown command; use git-gdrive config")
+		return errors.New("unknown command; use git-gdrive config or install")
 	}
 	flags := flag.NewFlagSet("config", flag.ContinueOnError)
 	flags.SetOutput(output)
