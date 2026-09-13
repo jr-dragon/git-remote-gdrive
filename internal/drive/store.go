@@ -95,6 +95,11 @@ func (s *Store) UploadArchive(ctx context.Context, kind, name string, reader io.
 	if kind != "branch" && kind != "tags" {
 		return "", errors.New("invalid archive directory kind")
 	}
+	// Keep the manifest's logical kind stable while using plural folder names.
+	directoryName := kind
+	if kind == "branch" {
+		directoryName = "branches"
+	}
 	if s.archiveDirectories == nil {
 		s.archiveDirectories = make(map[string]string)
 	}
@@ -104,7 +109,7 @@ func (s *Store) UploadArchive(ctx context.Context, kind, name string, reader io.
 	dir := s.archiveDirectories[kind]
 	if dir == "" {
 		var err error
-		dir, err = s.Client.createNamedFolder(ctx, s.Root, kind)
+		dir, err = s.Client.createNamedFolder(ctx, s.Root, directoryName)
 		if err != nil {
 			return "", err
 		}
@@ -116,8 +121,27 @@ func (s *Store) UploadArchive(ctx context.Context, kind, name string, reader io.
 		if err != nil {
 			return "", err
 		}
-		if !meta.in(s.Root) || meta.MIME != folderMIME || meta.Title != kind || meta.value("gdrive-format") != "1" {
+		legacy := kind == "branch" && meta.Title == "branch"
+		if !meta.in(s.Root) || meta.MIME != folderMIME || (meta.Title != directoryName && !legacy) || meta.value("gdrive-format") != "1" {
 			return "", errors.New("invalid archive directory on Drive")
+		}
+		if legacy {
+			if err := s.checkArchiveVersion(ctx); err != nil {
+				return "", err
+			}
+			if meta.ETag == "" {
+				return "", errors.New("Drive returned no archive directory ETag; refusing an unconditional rename")
+			}
+			patch, _ := json.Marshal(struct {
+				Title string `json:"title"`
+			}{directoryName})
+			res, err := s.Client.request(ctx, "PATCH", s.Client.BaseURL+"/drive/v2/files/"+url.PathEscape(dir)+"?supportsAllDrives=true", patch, http.Header{"Content-Type": {"application/json"}, "If-Match": {meta.ETag}})
+			if res != nil {
+				res.Body.Close()
+			}
+			if err != nil {
+				return "", fmt.Errorf("rename branch archive directory: %w", err)
+			}
 		}
 		s.checkedArchiveDirectories[kind] = true
 	}
@@ -127,16 +151,23 @@ func (s *Store) UploadArchive(ctx context.Context, kind, name string, reader io.
 	}
 	// Reject an already-stale push before overwriting a mutable convenience ZIP.
 	// Refs have already been published; ZIP metadata uses a separate CAS later.
+	if err := s.checkArchiveVersion(ctx); err != nil {
+		return "", err
+	}
+	return s.Client.uploadFile(ctx, existing, dir, name, reader, size)
+}
+
+func (s *Store) checkArchiveVersion(ctx context.Context) error {
 	if s.loaded {
 		root, err := s.root(ctx)
 		if err != nil {
-			return "", err
+			return err
 		}
 		if root.value(manifestKey) != s.version {
-			return "", repository.ErrConflict
+			return repository.ErrConflict
 		}
 	}
-	return s.Client.uploadFile(ctx, existing, dir, name, reader, size)
+	return nil
 }
 
 func (s *Store) ensureDirectory(ctx context.Context) error {

@@ -131,6 +131,32 @@ push chooses the pushed local default branch as remote HEAD when possible;
 otherwise it chooses the first branch in sorted order. HEAD remains stable until
 that branch is deleted, then moves to a remaining branch if one exists.
 
+## Transfer progress
+
+Clone, push, pull, and fetch group all files into one remote-helper task and show
+its overall percentage, current `file N/total`, current file percentage, and byte
+counts on stderr when Git enables progress. Push plans pack, asset, ZIP, and
+manifest transfers before its uploads; fetch groups all missing pack downloads.
+If push must first retrieve old packs needed for validation, those appear in the
+same task before its final total is known. Updates are limited to once per second
+per file, plus start/end messages. Retries use absolute byte offsets, failed files
+do not advance the overall completion count, and 100% is shown only when every
+planned file succeeds. Ref publication is reported separately after the
+conditional update.
+
+Git normally enables progress on an interactive terminal. To force progress when
+output is redirected, use:
+
+```sh
+git clone --progress gdrive://YOUR_FOLDER_ID
+git push --progress origin HEAD
+git pull --progress
+```
+
+`--quiet` and `--no-progress` suppress remote-helper progress; errors and ZIP
+export warnings are still reported. Git controls its own checkout/merge output
+after the remote-helper phase.
+
 ## Optional large assets
 
 Use `gdrive-assets` to version binaries or libraries with small Git pointers and
@@ -201,7 +227,7 @@ Every pushed branch or tag also gets a ZIP snapshot under the selected Drive roo
 
 ```text
 YOUR_FOLDER_ID/
-  branch/
+  branches/
     main.zip
     feature%2Flogin.zip
   tags/
@@ -218,7 +244,7 @@ ZIPs follow `git archive` behavior, including
 uncommitted changes, or untracked files; submodule contents are not fetched. A tag
 pointing directly to a blob produces a ZIP with one file named `blob`.
 
-The helper creates `branch/` and `tags/` lazily and records their Drive IDs in the
+The helper creates `branches/` and `tags/` lazily and records their Drive IDs in the
 manifest for reuse across users. Push first uploads the pack and publishes refs;
 only after that succeeds does it generate/upload or overwrite ZIPs. Successful
 exports are recorded in a separate conditional manifest update containing each
@@ -227,6 +253,10 @@ in place using its existing Drive file ID; a ZIP is created only if none exists.
 Ref deletion removes the current mapping while leaving the last ZIP in place,
 and recreating the ref reuses that file. Dry runs and unchanged refs do not upload ZIPs. Older
 repositories remain readable; ZIPs are added as their branches/tags are updated.
+
+Existing canonical `branch/` folders are renamed to `branches/` on the next
+branch ZIP export, preserving the folder and ZIP file IDs. The manifest retains
+the `branch` key for compatibility. Use updated helpers when writing these folders.
 
 If ref publication fails, ZIPs are not touched. If ZIP generation, upload, or its
 metadata update fails afterward, Git push stays successful and stderr shows a

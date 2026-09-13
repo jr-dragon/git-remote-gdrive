@@ -265,6 +265,14 @@ func (d *mockDrive) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		var patch mockFile
 		json.NewDecoder(r.Body).Decode(&patch)
+		if patch.Title != "" {
+			f.Title = patch.Title
+			d.seq++
+			f.ETag = strconv.Quote(strconv.Itoa(d.seq))
+			d.events = append(d.events, "rename")
+			json.NewEncoder(w).Encode(f)
+			return
+		}
 		if d.failArchiveMetadata {
 			for _, p := range patch.Properties {
 				if p.Key == "gdrive-manifest" {
@@ -575,7 +583,11 @@ func (d *mockDrive) archiveContents(t *testing.T, m repository.Manifest, ref str
 		t.Fatal(err)
 	}
 	dir := d.files[m.ArchiveDirectories[kind]]
-	if dir == nil || dir.Title != kind || len(dir.Parents) != 1 || dir.Parents[0].ID != "root" || len(f.Parents) != 1 || f.Parents[0].ID != dir.ID || f.Title != name || f.MIME != "application/zip" {
+	directoryName := kind
+	if kind == "branch" {
+		directoryName = "branches"
+	}
+	if dir == nil || dir.Title != directoryName || len(dir.Parents) != 1 || dir.Parents[0].ID != "root" || len(f.Parents) != 1 || f.Parents[0].ID != dir.ID || f.Title != name || f.MIME != "application/zip" {
 		d.mu.Unlock()
 		t.Fatalf("wrong archive placement/name/MIME for %s", ref)
 	}
@@ -657,6 +669,11 @@ func TestPushArchives(t *testing.T) {
 	}
 	oldBranch, oldTag := m.Archives["refs/heads/feature/a"], m.Archives["refs/tags/v1"]
 	branchDir, tagDir := m.ArchiveDirectories["branch"], m.ArchiveDirectories["tags"]
+	d.mu.Lock()
+	if d.files[branchDir].Title != "branches" || d.files[tagDir].Title != "tags" {
+		t.Error("archive directories must be named branches and tags")
+	}
+	d.mu.Unlock()
 	write("hello.txt", "third\n")
 	git(source, "add", "hello.txt")
 	git(source, "commit", "-m", "third")
@@ -806,6 +823,63 @@ func TestArchiveOverwriteResumeAndStaleWriter(t *testing.T) {
 	defer d.mu.Unlock()
 	if !bytes.Equal(d.files[id].Data, updated) {
 		t.Fatal("resume or stale writer corrupted overwritten ZIP")
+	}
+}
+
+func TestLegacyBranchArchiveDirectory(t *testing.T) {
+	d := newMockDrive(t)
+	env := testEnvironment(t, d)
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	git := func(dir string, args ...string) string { return gitCommand(t, dir, env, true, args...) }
+	git(root, "init", "-b", "main", source)
+	git(source, "commit", "--allow-empty", "-m", "initial")
+	git(source, "push", "gdrive://root", "main")
+	m := d.manifest(t)
+	dir := m.ArchiveDirectories["branch"]
+	archive := m.Archives["refs/heads/main"]
+	d.mu.Lock()
+	d.files[dir].Title, d.files[dir].ETag = "branch", ""
+	d.mu.Unlock()
+	git(source, "commit", "--allow-empty", "-m", "update")
+	output := git(source, "push", "gdrive://root", "main")
+	if !strings.Contains(output, "refusing an unconditional rename") {
+		t.Fatalf("missing rename warning: %s", output)
+	}
+	d.mu.Lock()
+	if d.files[dir].Title != "branch" {
+		t.Error("renamed without ETag")
+	}
+	d.files[dir].ETag = `"legacy"`
+	d.conflict = true
+	d.mu.Unlock()
+	git(source, "commit", "--allow-empty", "-m", "retry")
+	gitCommand(t, source, env, false, "push", "gdrive://root", "main")
+	d.mu.Lock()
+	if d.files[dir].Title != "branch" {
+		t.Error("failed ref update renamed folder")
+	}
+	d.conflict = false
+	eventsBefore := len(d.events)
+	d.mu.Unlock()
+	git(source, "push", "--dry-run", "gdrive://root", "main")
+	d.mu.Lock()
+	if d.files[dir].Title != "branch" || len(d.events) != eventsBefore {
+		t.Error("dry-run renamed folder")
+	}
+	d.mu.Unlock()
+	git(source, "push", "gdrive://root", "main")
+	updated := d.manifest(t)
+	if updated.ArchiveDirectories["branch"] != dir || updated.Archives["refs/heads/main"].ID != archive.ID {
+		t.Fatal("migration replaced folder or ZIP IDs")
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.files[dir].Title != "branches" {
+		t.Error("legacy folder was not renamed")
+	}
+	if got := strings.Join(d.events[eventsBefore:], ","); got != "publish,rename,zip,publish" {
+		t.Errorf("incorrect migration order: %s", got)
 	}
 }
 

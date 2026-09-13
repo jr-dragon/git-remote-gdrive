@@ -16,6 +16,7 @@ import (
 	"github.com/jr-dragon/git-remote-gdrive/internal/assets"
 	"github.com/jr-dragon/git-remote-gdrive/internal/drive"
 	"github.com/jr-dragon/git-remote-gdrive/internal/googleauth"
+	"github.com/jr-dragon/git-remote-gdrive/internal/progress"
 	"github.com/jr-dragon/git-remote-gdrive/internal/repository"
 )
 
@@ -193,16 +194,19 @@ func (r *Resolver) Ensure(ctx context.Context, p assets.Pointer) error {
 }
 
 func receive(ctx context.Context, cache assets.Cache, p assets.Pointer, store repository.Store, a repository.Asset) error {
+	transfer := progress.Start(ctx, "Receiving asset "+p.OID[:12], p.Size)
 	reader, writer := io.Pipe()
 	done := make(chan error, 1)
 	go func() {
-		err := store.Download(ctx, repository.Pack{ID: a.ID, Size: a.Size}, writer)
+		err := store.Download(ctx, repository.Pack{ID: a.ID, Size: a.Size}, transfer.Writer(writer))
 		writer.CloseWithError(err)
 		done <- err
 	}()
 	_, err := cache.Put(reader, &p)
 	reader.CloseWithError(err)
-	return errors.Join(err, <-done)
+	err = errors.Join(err, <-done)
+	transfer.Finish(err)
+	return err
 }
 
 func (r *Resolver) roots(ctx context.Context, cache assets.Cache) ([]string, error) {

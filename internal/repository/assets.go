@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/jr-dragon/git-remote-gdrive/internal/assets"
+	"github.com/jr-dragon/git-remote-gdrive/internal/progress"
 )
 
 func (g Git) AssetCache(ctx context.Context) (assets.Cache, error) {
@@ -140,12 +141,59 @@ func (g Git) AssetPointers(ctx context.Context, refs map[string]string) (map[str
 	return result, nil
 }
 
+type AssetPlan struct {
+	Pointers map[string]assets.Pointer
+	Missing  []string
+	Recover  map[string]bool
+}
+
+func (p AssetPlan) TransferCount() int {
+	total := len(p.Missing)
+	for _, oid := range p.Missing {
+		if p.Recover[oid] {
+			total++
+		}
+	}
+	return total
+}
+
+// PlanAssets validates all reachable pointers and determines the exact number of
+// source downloads and destination uploads before task progress starts.
+func (g Git) PlanAssets(ctx context.Context, next *Manifest) (AssetPlan, error) {
+	progress.Step(ctx, "Checking asset history...")
+	pointers, err := g.AssetPointers(ctx, next.Refs)
+	plan := AssetPlan{Pointers: pointers, Recover: map[string]bool{}}
+	if err != nil || len(pointers) == 0 {
+		return plan, err
+	}
+	cache, err := g.AssetCache(ctx)
+	if err != nil {
+		return plan, err
+	}
+	for _, oid := range slices.Sorted(maps.Keys(pointers)) {
+		p := pointers[oid]
+		if existing, ok := next.Assets[oid]; ok {
+			if existing.Size != p.Size {
+				return plan, errors.New("asset pointer size differs from remote index")
+			}
+			continue
+		}
+		plan.Missing = append(plan.Missing, oid)
+		f, err := cache.Open(p)
+		if err == nil {
+			f.Close()
+		} else {
+			plan.Recover[oid] = true
+		}
+	}
+	return plan, nil
+}
+
 // UploadAssets preserves the complete published index, including old versions.
 // All required content must exist before the caller may publish new refs.
-func (g Git) UploadAssets(ctx context.Context, store Store, next *Manifest, recover func(context.Context, assets.Pointer) error) error {
-	pointers, err := g.AssetPointers(ctx, next.Refs)
-	if err != nil || len(pointers) == 0 {
-		return err
+func (g Git) UploadAssets(ctx context.Context, store Store, next *Manifest, plan AssetPlan, recover func(context.Context, assets.Pointer) error) error {
+	if len(plan.Pointers) == 0 {
+		return nil
 	}
 	cache, err := g.AssetCache(ctx)
 	if err != nil {
@@ -155,21 +203,17 @@ func (g Git) UploadAssets(ctx context.Context, store Store, next *Manifest, reco
 	if next.Assets == nil {
 		next.Assets = map[string]Asset{}
 	}
-	for _, oid := range slices.Sorted(maps.Keys(pointers)) {
-		p := pointers[oid]
-		if existing, ok := next.Assets[oid]; ok {
-			if existing.Size != p.Size {
-				return errors.New("asset pointer size differs from remote index")
+	for _, oid := range plan.Missing {
+		p := plan.Pointers[oid]
+		if plan.Recover[oid] {
+			if recover == nil {
+				return fmt.Errorf("asset %s is missing from the local cache", oid)
 			}
-			continue
-		}
-		f, err := cache.Open(p)
-		if err != nil && recover != nil {
 			if err := recover(ctx, p); err != nil {
 				return fmt.Errorf("retrieve asset %s before push: %w", oid, err)
 			}
-			f, err = cache.Open(p)
 		}
+		f, err := cache.Open(p)
 		if err != nil {
 			return fmt.Errorf("asset %s missing or corrupt; restore its content and git add it again: %w", oid, err)
 		}

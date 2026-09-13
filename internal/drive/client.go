@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jr-dragon/git-remote-gdrive/internal/progress"
 )
 
 const folderMIME = "application/vnd.google-apps.folder"
@@ -123,6 +125,7 @@ func (c *Client) wait(ctx context.Context, attempt int, retryAfter string) error
 	} else if date, err := http.ParseTime(retryAfter); err == nil {
 		delay = max(delay, min(time.Until(date), 5*time.Minute))
 	}
+	progress.Step(ctx, fmt.Sprintf("Drive request interrupted or rate limited; retrying in %s (retry %d)", delay.Round(time.Second), attempt+1))
 	return c.sleep(ctx, delay)
 }
 
@@ -278,7 +281,20 @@ func (c *Client) findArchive(ctx context.Context, dir, name string) (file, error
 	}
 }
 
-func (c *Client) uploadFile(ctx context.Context, existing file, dir, name string, reader io.ReadSeeker, size int64) (string, error) {
+func (c *Client) uploadFile(ctx context.Context, existing file, dir, name string, reader io.ReadSeeker, size int64) (uploadedID string, err error) {
+	label := "Uploading " + name
+	if strings.HasSuffix(name, ".pack") {
+		label = "Uploading Git pack"
+	}
+	if strings.HasPrefix(name, "asset-sha256-") {
+		digest := strings.TrimPrefix(name, "asset-sha256-")
+		label = "Uploading asset " + digest[:min(len(digest), 12)]
+	}
+	if strings.HasSuffix(name, ".zip") {
+		label = "Uploading ZIP " + name
+	}
+	transfer := progress.Start(ctx, label, size)
+	defer func() { transfer.Finish(err) }()
 	id := existing.ID
 	method, endpoint := "POST", c.BaseURL+"/upload/drive/v2/files?uploadType=resumable&supportsAllDrives=true"
 	metadata := file{Title: name}
@@ -341,7 +357,7 @@ func (c *Client) uploadFile(ctx context.Context, existing file, dir, name string
 		if _, err := io.ReadFull(reader, chunk); err != nil {
 			return "", err
 		}
-		req, err := http.NewRequestWithContext(ctx, "PUT", session, bytes.NewReader(chunk))
+		req, err := http.NewRequestWithContext(ctx, "PUT", session, transfer.Reader(bytes.NewReader(chunk), offset))
 		if err != nil {
 			return "", err
 		}
@@ -364,6 +380,7 @@ func (c *Client) uploadFile(ctx context.Context, existing file, dir, name string
 				}
 				if next > offset && next <= end {
 					offset = next
+					transfer.Update(offset)
 					stalled = 0
 					continue
 				}
@@ -406,6 +423,7 @@ func (c *Client) uploadFile(ctx context.Context, existing file, dir, name string
 				stalled = 0
 			}
 			offset = next
+			transfer.Update(offset)
 		}
 	}
 	return "", errors.New("upload ended without a completion response")

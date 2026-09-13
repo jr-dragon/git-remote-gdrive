@@ -12,6 +12,8 @@ import (
 	"net/url"
 	"os"
 	"strings"
+
+	"github.com/jr-dragon/git-remote-gdrive/internal/progress"
 )
 
 // ArchiveLocation uses the destination ref, not the local branch name. Escaping
@@ -40,6 +42,7 @@ func (g Git) MakeArchive(ctx context.Context, store Store, ref, oid string) (Arc
 	if err != nil {
 		return Archive{}, err
 	}
+	progress.Step(ctx, "Creating ZIP for "+ref+"...")
 	f, err := os.CreateTemp("", "gdrive-archive-*.zip")
 	if err != nil {
 		return Archive{}, err

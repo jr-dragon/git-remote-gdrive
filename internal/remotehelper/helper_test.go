@@ -5,6 +5,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/jr-dragon/git-remote-gdrive/internal/progress"
 )
 
 func TestFolderID(t *testing.T) {
@@ -15,6 +17,31 @@ func TestFolderID(t *testing.T) {
 	}
 	if id, err := FolderID("gdrive://AbCd_123-xyz"); err != nil || id != "AbCd_123-xyz" {
 		t.Fatal(id, err)
+	}
+}
+
+func TestProgressOptions(t *testing.T) {
+	var diagnostics bytes.Buffer
+	ctx, reporter := progress.New(context.Background(), &diagnostics)
+	h := Helper{reporter: reporter}
+	for _, option := range []string{"progress false", "verbosity 0", "progress true"} {
+		if got := h.option(option); got != "ok" {
+			t.Fatal(got)
+		}
+		progress.Step(ctx, "hidden")
+	}
+	if diagnostics.Len() != 0 {
+		t.Fatal("quiet progress was not suppressed")
+	}
+	if h.option("verbosity -1") != "error invalid verbosity" {
+		t.Fatal("accepted invalid verbosity")
+	}
+	if h.option("verbosity 1") != "ok" {
+		t.Fatal("verbosity rejected")
+	}
+	progress.Step(ctx, "visible")
+	if diagnostics.String() != "gdrive: visible\n" {
+		t.Fatal(diagnostics.String())
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/jr-dragon/git-remote-gdrive/internal/gdriveassets"
+	"github.com/jr-dragon/git-remote-gdrive/internal/progress"
 	"github.com/jr-dragon/git-remote-gdrive/internal/repository"
 )
 
@@ -33,6 +34,7 @@ type Helper struct {
 	manifest       *repository.Manifest
 	version        string
 	dryRun         bool
+	reporter       *progress.Reporter
 }
 
 func (h *Helper) load(ctx context.Context) error {
@@ -69,6 +71,7 @@ func (h *Helper) git(ctx context.Context) (repository.Git, error) {
 }
 
 func (h *Helper) Run(ctx context.Context, input io.Reader, output io.Writer) error {
+	ctx, h.reporter = progress.New(ctx, h.Diagnostics)
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 4096), 1<<20)
 	out := bufio.NewWriter(output)
@@ -147,13 +150,18 @@ func (h *Helper) option(value string) string {
 	}
 	switch name {
 	case "verbosity":
-		if _, err := strconv.Atoi(arg); err != nil {
+		verbosity, err := strconv.Atoi(arg)
+		if err != nil || verbosity < 0 {
 			return "error invalid verbosity"
 		}
+		h.reporter.SetVerbosity(verbosity)
 		return "ok"
 	case "progress", "atomic":
 		if arg != "true" && arg != "false" {
 			return "error expected true or false"
+		}
+		if name == "progress" {
+			h.reporter.SetEnabled(arg == "true")
 		}
 		return "ok"
 	case "dry-run":
@@ -168,6 +176,7 @@ func (h *Helper) option(value string) string {
 }
 
 func (h *Helper) fetch(ctx context.Context, batch []string) error {
+	progress.Step(ctx, "Fetching repository...")
 	if err := h.load(ctx); err != nil {
 		return err
 	}
@@ -192,10 +201,19 @@ func (h *Helper) fetch(ctx context.Context, batch []string) error {
 	if err != nil {
 		return err
 	}
+	missingPacks, err := g.MissingPacks(ctx, h.manifest.Packs)
+	if err != nil {
+		return err
+	}
+	ctx = progress.BeginTask(ctx, "Fetch", len(missingPacks))
 	if err := g.Hydrate(ctx, h.store, h.manifest); err != nil {
 		return err
 	}
-	return g.RememberAssetRemote(ctx, h.manifest)
+	if err := g.RememberAssetRemote(ctx, h.manifest); err != nil {
+		return err
+	}
+	progress.Step(ctx, "Fetch complete")
+	return nil
 }
 
 type update struct {
@@ -244,6 +262,8 @@ func (h *Helper) apply(ctx context.Context, updates []update) error {
 	if err != nil {
 		return err
 	}
+	ctx = progress.BeginTask(ctx, "Push", 0)
+	progress.Step(ctx, "Preparing...")
 	if err := g.Hydrate(ctx, h.store, h.manifest); err != nil {
 		return err
 	}
@@ -336,16 +356,36 @@ func (h *Helper) apply(ctx context.Context, updates []update) error {
 		return err
 	}
 	if h.dryRun {
+		progress.SetRemaining(ctx, 0)
+		progress.Step(ctx, "Dry run complete; no refs published")
 		return nil
 	}
-	resolver := gdriveassets.Resolver{Git: g, Open: h.OpenAssetStore}
-	if err := g.UploadAssets(ctx, h.store, &next, resolver.Ensure); err != nil {
+	assetPlan, err := g.PlanAssets(ctx, &next)
+	if err != nil {
 		return err
 	}
 	full := len(next.Packs) >= repository.MaxPacks
+	needsPack, err := g.NeedsPack(ctx, h.manifest, &next, full)
+	if err != nil {
+		return err
+	}
+	archiveFiles := archiveTransferCount(updates, &next)
+	remainingFiles := assetPlan.TransferCount() + 1 + archiveFiles
+	if needsPack {
+		remainingFiles++
+	}
+	if archiveFiles > 0 {
+		remainingFiles++
+	}
+	progress.SetRemaining(ctx, remainingFiles)
+	progress.Step(ctx, fmt.Sprintf("Processing %d remaining files...", remainingFiles))
+	resolver := gdriveassets.Resolver{Git: g, Open: h.OpenAssetStore}
+	if err := g.UploadAssets(ctx, h.store, &next, assetPlan, resolver.Ensure); err != nil {
+		return err
+	}
 	if len(next.Refs) == 0 {
 		next.Packs = nil
-	} else {
+	} else if needsPack {
 		pack, err := g.MakePack(ctx, h.store, h.manifest, &next, full)
 		if err != nil {
 			return err
@@ -357,15 +397,31 @@ func (h *Helper) apply(ctx context.Context, updates []update) error {
 			next.Packs = append(next.Packs, *pack)
 		}
 	}
+	progress.Step(ctx, "Publishing refs...")
 	if err := h.store.Publish(ctx, h.version, &next); err != nil {
 		return err
 	}
+	progress.Step(ctx, "Refs published")
 	// Refs are committed. Export failures must not turn a successful push into
 	// an error or trigger rollback. ZIP metadata gets its own conditional publish.
 	h.manifest = nil
 	h.completeArchives(ctx, g, updates, next.Refs)
 	h.manifest = nil
 	return nil
+}
+
+func archiveTransferCount(updates []update, next *repository.Manifest) int {
+	total := 0
+	for _, u := range updates {
+		if u.src == "" || (!strings.HasPrefix(u.dst, "refs/heads/") && !strings.HasPrefix(u.dst, "refs/tags/")) {
+			continue
+		}
+		archive, exists := next.Archives[u.dst]
+		if !exists || archive.OID != next.Refs[u.dst] {
+			total++
+		}
+	}
+	return total
 }
 
 func (h *Helper) warnArchive(err error) {
@@ -413,6 +469,7 @@ func (h *Helper) completeArchives(ctx context.Context, g repository.Git, updates
 		changed = true
 	}
 	if changed {
+		progress.Step(ctx, "Saving ZIP metadata...")
 		if err := h.store.Publish(ctx, h.version, current); err != nil {
 			h.warnArchive(fmt.Errorf("save ZIP metadata: %w", err))
 		}

@@ -22,12 +22,22 @@ The `gdrive-format=1` property identifies the directory layout; the manifest's
 `version` controls required reader/writer features.
 
 Optional `archive_directories` in the manifest maps `branch` and `tags` to their
-Drive folder IDs. These named folders are direct children of the selected root,
+Drive folder IDs. The `branch` key is retained for compatibility and identifies
+the folder named `branches`; the `tags` key identifies `tags`.
+These named folders are direct children of the selected root,
 separate from `@.git-remote-gdrive`, and carry PUBLIC property `gdrive-format=1`.
 They are created lazily and identified by ID on later pushes. Existing unrelated
 folders with those names are not adopted. Concurrent/failed first archive uploads
 can leave candidate folders; the successfully published manifest selects the
 canonical IDs just as it does for repository initialization.
+
+On the next branch ZIP export after refs commit, a legacy canonical folder named
+`branch` is renamed in place to `branches`, preserving all folder/file IDs. The
+helper validates its parent, format marker, and current root manifest, and sends
+the folder's ETag with the conditional rename. Missing ETags or failed renames
+fail that export with a warning. Dry runs and rejected ref updates never rename
+the folder. Unrelated same-name folders are not adopted. Older helpers that
+require the singular folder name must be updated for ZIP writes.
 
 Drive file names are not unique. Multiple candidate directories can exist after
 concurrent initialization, and multiple `manifest.json` snapshots normally exist.
@@ -107,7 +117,7 @@ archived. Standard Git archive attributes apply, and submodule contents are not
 recursively downloaded. The temporary file is removed on completion or failure.
 
 ZIPs have MIME type `application/zip`. Names are
-`<percent-encoded-short-ref>.zip`, stored under `branch/` for
+`<percent-encoded-short-ref>.zip`, stored under `branches/` for
 `refs/heads/*` and `tags/` for `refs/tags/*`. Encoding `/` and `%` distinguishes
 `feature/a`, `feature%2Fa`, and `feature-a`. The full destination ref, not a local
 source branch name, determines the location. Other ref namespaces have no ZIP.

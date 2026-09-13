@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/jr-dragon/git-remote-gdrive/internal/progress"
 )
 
 type Git struct{ Dir string }
@@ -87,21 +89,53 @@ func (g Git) Hydrate(ctx context.Context, store Store, m *Manifest) error {
 	if err := g.Check(ctx); err != nil {
 		return err
 	}
-	for _, pack := range m.Packs {
+	missing, err := g.MissingPacks(ctx, m.Packs)
+	if err != nil {
+		return err
+	}
+	ctx = progress.BeginTask(ctx, "Fetch", len(missing))
+	for i, pack := range missing {
+		progress.Step(ctx, fmt.Sprintf("Fetching Git pack %d/%d...", i+1, len(missing)))
+		if err := g.importPack(ctx, store, pack); err != nil {
+			return err
+		}
+	}
+	return g.Connected(ctx, m.Refs)
+}
+
+func (g Git) MissingPacks(ctx context.Context, packs []Pack) ([]Pack, error) {
+	var missing []Pack
+	for _, pack := range packs {
 		idx, err := g.output(ctx, nil, "rev-parse", "--git-path", "objects/pack/pack-"+pack.Hash+".idx")
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if _, err := os.Stat(idx); err == nil {
 			if _, err := os.Stat(strings.TrimSuffix(idx, ".idx") + ".pack"); err == nil {
 				continue
 			}
 		}
-		if err := g.importPack(ctx, store, pack); err != nil {
-			return err
-		}
+		missing = append(missing, pack)
 	}
-	return g.Connected(ctx, m.Refs)
+	return missing, nil
+}
+
+func (g Git) NeedsPack(ctx context.Context, previous, next *Manifest, full bool) (bool, error) {
+	if len(next.Refs) == 0 {
+		return false, nil
+	}
+	if full {
+		return true, nil
+	}
+	var revisions strings.Builder
+	for _, ref := range SortedRefs(next.Refs) {
+		fmt.Fprintln(&revisions, next.Refs[ref])
+	}
+	for _, ref := range SortedRefs(previous.Refs) {
+		fmt.Fprintln(&revisions, "^"+previous.Refs[ref])
+	}
+	out, err := g.output(ctx, strings.NewReader(revisions.String()), "rev-list", "--objects", "--stdin", "--missing=error")
+	return out != "", err
 }
 
 func (g Git) Connected(ctx context.Context, refs map[string]string) error {
@@ -123,7 +157,9 @@ func (g Git) Connected(ctx context.Context, refs map[string]string) error {
 	return nil
 }
 
-func (g Git) importPack(ctx context.Context, store Store, pack Pack) error {
+func (g Git) importPack(ctx context.Context, store Store, pack Pack) (err error) {
+	transfer := progress.Start(ctx, "Receiving Git pack", pack.Size)
+	defer func() { transfer.Finish(err) }()
 	f, err := os.CreateTemp("", "gdrive-fetch-*.pack")
 	if err != nil {
 		return err
@@ -131,7 +167,7 @@ func (g Git) importPack(ctx context.Context, store Store, pack Pack) error {
 	defer os.Remove(f.Name())
 	defer f.Close()
 	h := sha256.New()
-	if err := store.Download(ctx, pack, io.MultiWriter(f, h)); err != nil {
+	if err := store.Download(ctx, pack, transfer.Writer(io.MultiWriter(f, h))); err != nil {
 		return err
 	}
 	info, err := f.Stat()
@@ -151,6 +187,7 @@ func (g Git) importPack(ctx context.Context, store Store, pack Pack) error {
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
+	progress.Step(ctx, "Verifying and indexing Git pack...")
 	_, err = g.output(ctx, f, "index-pack", "--stdin", "--strict")
 	return err
 }
@@ -158,6 +195,7 @@ func (g Git) importPack(ctx context.Context, store Store, pack Pack) error {
 // MakePack writes either a complete snapshot or only objects not reachable from
 // the previous refs. Packs are non-thin; earlier packs supply history, not deltas.
 func (g Git) MakePack(ctx context.Context, store Store, previous, next *Manifest, full bool) (*Pack, error) {
+	progress.Step(ctx, "Creating Git pack...")
 	f, err := os.CreateTemp("", "gdrive-push-*.pack")
 	if err != nil {
 		return nil, err

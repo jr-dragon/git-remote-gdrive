@@ -92,6 +92,20 @@ git push origin HEAD
 
 輔助程式支援分支、輕量標籤與附註標籤、ref 刪除、明確指定的強制推送、試執行（dry run），以及原子性的批次 push。除非要求強制推送，否則會拒絕已分歧的分支更新與既有標籤的替換。第一次 push 會盡可能將推送的本機預設分支設為遠端 HEAD；否則會選擇排序後的第一個分支。HEAD 會維持不變，直到該分支被刪除；若仍有其他分支，則改為指向其中一個。
 
+## 傳輸進度
+
+Git 啟用進度顯示時，clone、push、pull 與 fetch 會將所有檔案合併為一個遠端輔助程式任務，並在 stderr 顯示任務整體百分比、目前的 `file N/總數`、目前檔案百分比與位元組數。Push 會在開始上傳前盤點 pack、asset、ZIP 與 manifest；fetch 則會將所有缺少的 pack 下載合併計算。如果 push 必須先取得驗證所需的舊 packs，這些檔案會先顯示在同一任務中，接著才確定最終總數。除了開始與結束訊息外，每個檔案最多每秒更新一次。重試使用絕對位移計算進度；失敗檔案不會增加整體完成數，只有所有預定檔案都成功後才會顯示 100%。Refs 發布會在條件式更新成功後另行顯示。
+
+Git 通常會在互動式終端機中啟用進度。若要在輸出被重新導向時強制顯示進度，請使用：
+
+```sh
+git clone --progress gdrive://YOUR_FOLDER_ID
+git push --progress origin HEAD
+git pull --progress
+```
+
+`--quiet` 與 `--no-progress` 會關閉遠端輔助程式的進度訊息；錯誤與 ZIP 匯出警告仍會顯示。遠端輔助程式階段結束後，checkout／merge 的輸出由 Git 自行控制。
+
 ## 可選的大型資產管理
 
 使用 `gdrive-assets`，可以透過小型 Git 指標檔（pointer）對執行檔或函式庫進行版本控制，並將實際內容儲存在 Drive。這是可選功能；一般儲存庫不需要設定 filter。它採用 Git 的 [clean/smudge filter 機制](https://git-scm.com/docs/gitattributes)，使用自己的 pointer 格式與 Drive 儲存方式，不需要安裝 Git LFS。
@@ -146,7 +160,7 @@ Checkout 會按需下載 assets，並驗證大小與 SHA-256。已快取的內�
 
 ```text
 YOUR_FOLDER_ID/
-  branch/
+  branches/
     main.zip
     feature%2Flogin.zip
   tags/
@@ -157,7 +171,9 @@ YOUR_FOLDER_ID/
 
 壓縮檔名稱使用目的分支／標籤名稱，不包含物件 ID。Ref 名稱會經過百分比編碼，因此 `feature/login` 會變成 `feature%2Flogin`，並維持為單一檔名。附註標籤的 ZIP 會包含解參照後版本的檔案。ZIP 遵循 `git archive` 的行為，包括 `export-ignore`／`export-subst` 屬性。內容包含已追蹤的檔案，不包含 `.git`、尚未提交的變更或未追蹤的檔案；也不會取得 submodule 的內容。直接指向 blob 的標籤會產生只有一個名為 `blob` 的檔案的 ZIP。
 
-輔助程式會在需要時才建立 `branch/` 與 `tags/`，並將其 Drive ID 記錄在 manifest 中，供不同使用者重複使用。Push 會先上傳 pack 並發布 refs；成功後才產生、上傳或覆寫 ZIP。成功的匯出結果會透過另一次條件式 manifest 更新來記錄，包含各 ZIP 的 ID、物件 ID、大小與 SHA-256 摘要。同名 ZIP 會使用既有的 Drive 檔案 ID 原地覆寫；只有不存在時才會建立新的 ZIP。刪除 ref 會移除目前的對應記錄，但保留最後一份 ZIP；重新建立 ref 時會重複使用該檔案。試執行與未變更的 refs 不會上傳 ZIP。舊儲存庫仍可讀取；其分支／標籤更新時會加入 ZIP。
+輔助程式會在需要時才建立 `branches/` 與 `tags/`，並將其 Drive ID 記錄在 manifest 中，供不同使用者重複使用。Push 會先上傳 pack 並發布 refs；成功後才產生、上傳或覆寫 ZIP。成功的匯出結果會透過另一次條件式 manifest 更新來記錄，包含各 ZIP 的 ID、物件 ID、大小與 SHA-256 摘要。同名 ZIP 會使用既有的 Drive 檔案 ID 原地覆寫；只有不存在時才會建立新的 ZIP。刪除 ref 會移除目前的對應記錄，但保留最後一份 ZIP；重新建立 ref 時會重複使用該檔案。試執行與未變更的 refs 不會上傳 ZIP。舊儲存庫仍可讀取；其分支／標籤更新時會加入 ZIP。
+
+既有且由 manifest 指定的 `branch/` 資料夾，會在下一次分支 ZIP 匯出時改名為 `branches/`，保留資料夾與 ZIP 檔案的 ID。Manifest 會保留 `branch` 鍵以維持相容性。寫入這些資料夾時，請使用更新後的輔助程式。
 
 如果 ref 發布失敗，ZIP 不會被變更。如果後續的 ZIP 產生、上傳或中繼資料更新失敗，Git push 仍維持成功，並在標準錯誤輸出（stderr）顯示警告，不會回滾 refs。發布 refs 時，已變更 ref 的舊 ZIP 對應記錄會被移除，因此缺少對應記錄表示匯出尚未確認或不存在。舊 ZIP 檔案可能會保留到下一次成功更新。已是最新狀態的 push 不會重試失敗的匯出；之後更新 ref 時，才會再次嘗試匯出。
 
