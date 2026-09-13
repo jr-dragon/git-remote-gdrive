@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -251,6 +252,20 @@ func (g Git) RememberAssetRemote(ctx context.Context, m *Manifest) error {
 		return err
 	}
 	return f.Close()
+}
+
+// RememberLocalAssetRemote records the user-selected local transport URL, never
+// paths supplied by a downloaded manifest. Literal-URL fetches also support smudge.
+func (g Git) RememberLocalAssetRemote(ctx context.Context, raw string) error {
+	cache, err := g.AssetCache(ctx)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(cache.Dir, "local-remotes")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, fmt.Sprintf("%x", sha256.Sum256([]byte(raw)))), []byte(raw), 0600)
 }
 
 func (g Git) AssetRemoteURLs(ctx context.Context) ([]string, error) {

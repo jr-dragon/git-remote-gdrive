@@ -5,16 +5,45 @@
 [![Testing](https://github.com/jr-dragon/git-remote-gdrive/actions/workflows/testing.yml/badge.svg)](https://github.com/jr-dragon/git-remote-gdrive/actions/workflows/testing.yml)
 
 透過 `gdrive://{folder_id}` 將 Google Drive 作為 Git 遠端儲存庫。本專案提供瀏覽器 OAuth 認證，以及支援 clone、fetch 與 push 的遠端輔助程式（remote helper）。
+也可以使用 `gdrive-local:///absolute/path`，在無需 OAuth 或 Drive API 的情況下將本地資料夾作為 remote，再自行傳輸或使用 Google Drive 電腦版同步。
 
 ## 安裝
 
 使用 `go.mod` 指定的 Go 版本執行：
 
 ```sh
-go install ./git-gdrive ./git-remote-gdrive
+go install ./git-gdrive ./git-remote-gdrive ./git-remote-gdrive-local
 ```
 
-將 Go 執行檔的安裝目錄加入 `PATH`。也可以執行 `make build`，並將產生的 `build/` 目錄加入 `PATH`。兩個執行檔與 Git 本身都必須可用，且 Git 版本須為 2.36 或更新版本：`git-gdrive` 提供 `git gdrive` 指令，而 Git 會自動呼叫 `git-remote-gdrive` 來處理 `gdrive://` URL。
+將 Go 執行檔的安裝目錄加入 `PATH`。也可以執行 `make build`，並將產生的 `build/` 目錄加入 `PATH`。需要 Git 2.36 或更新版本：`git-gdrive` 提供 `git gdrive` 指令，Git 自動呼叫 `git-remote-gdrive` 處理 `gdrive://`，或 `git-remote-gdrive-local` 處理 `gdrive-local://`。本地模式不需要 credential。
+
+## 本地資料夾 remote（不使用 Drive API）
+
+在 Git 工作目錄之外建立專用資料夾，並以絕對路徑設定 remote：
+
+```sh
+mkdir -p /absolute/path/Drive/project-remote
+git remote add origin 'gdrive-local:///absolute/path/Drive/project-remote'
+git push -u origin main
+git push origin --tags
+```
+
+Windows 使用 `gdrive-local:///C:/Users/me/Drive/project-remote`。包含空格的 URL 請加引號；路徑中的 `%`、`#`、`?` 請分別編碼為 `%25`、`%23`、`%3F`。不支援相對路徑與 UNC 路徑。既有 remote 可用 `git remote set-url origin <local-url>` 修改。
+
+Push 完成後，上傳或複製**整個 root**，包含 `@.git-remote-gdrive/`。其他使用者完整下載資料夾後執行：
+
+```sh
+git clone 'gdrive-local:///absolute/path/downloaded/project-remote' project
+cd project
+# 開發並 commit 後：
+git push origin main
+```
+
+資料夾包含可搬移的 packs、refs／HEAD／tags、manifests 與選用的 assets；ZIP 會在 refs 發布成功後寫入 `branches/` 與 `tags/`。Assets 沿用 `git gdrive install` 與 `.gitattributes` 設定。若要在 clone 時還原 assets，可事先執行 `git gdrive install --global`；或先 `clone --no-checkout`，在專案內安裝 filter 後再 checkout。
+
+跨電腦協作時，必須協調**同一時間只有一位寫入者**：fetch/pull 前先完成下載，push 後先完成上傳，再交給下一位使用者。使用 Google Drive 電腦版時，請將資料夾設為可離線使用。本地鎖與版本檢查能保護共用同一本地檔案系統的程序，無法鎖定各台電腦獨立同步的副本。若 `CURRENT` 發生同步衝突，請保留雙方副本、透過 Git 整合歷史後，再發布完整資料夾。缺少物件或指標時會回報錯誤，不會自動選擇較舊 manifest。
+
+本地可攜格式與 API 後端的 Drive ID／自訂屬性格式不同：上傳本地 remote **不會**使其支援 `gdrive://`，下載 API remote 也不會自動轉換。遷移時，請從已取得所需歷史與 assets 的 Git checkout，新增空白目的地 remote，再 push 所需 branches 與 tags。詳見[本地儲存格式](docs/storage-local.md)。
 
 ## Google OAuth 設定
 
@@ -204,7 +233,7 @@ Pack 與 manifest 上傳完成後才會發布。輔助程式會重新讀取根�
 
 每次 push 至 `main` 時，**Testing** 工作流程都會執行 `go test -race ./...` 與 `go vet ./...`。兩個工作流程都使用 `go.mod` 宣告的 Go 版本。
 
-發布 GitHub Release（包含預先發行版本）會針對該標籤觸發 **Build**。它會停用 CGO，為以下目標平台交叉編譯兩個執行檔：
+發布 GitHub Release（包含預先發行版本）會針對該標籤觸發 **Build**。它會停用 CGO，為以下目標平台交叉編譯三個執行檔：
 
 | 平台 | 發佈壓縮檔 |
 | --- | --- |
@@ -214,4 +243,4 @@ Pack 與 manifest 上傳完成後才會發布。輔助程式會重新讀取根�
 | Windows x86_64 | `git-remote-gdrive-windows-x86_64.zip` |
 | Windows ARM64 | `git-remote-gdrive-windows-arm64.zip` |
 
-每個壓縮檔包含 `git-gdrive`、`git-remote-gdrive`（Windows 版本附有 `.exe` 副檔名）、LICENSE 與 README。工作流程會使用內建的 `GITHUB_TOKEN`，將壓縮檔及其 `.sha256` 校驗碼附加至觸發建置的 release，不需要額外的 secret。重新執行建置會取代該平台對應的 assets。Release 必須允許上傳／替換 assets；此工作流程不會啟用不可變 release。ARM 目標指的是 64 位元 ARM，而非 32 位元 ARMv7。
+每個壓縮檔包含 `git-gdrive`、`git-remote-gdrive`、`git-remote-gdrive-local`（Windows 版本附有 `.exe` 副檔名）、LICENSE 與 README。工作流程會使用內建的 `GITHUB_TOKEN`，將壓縮檔及其 `.sha256` 校驗碼附加至觸發建置的 release，不需要額外的 secret。重新執行建置會取代該平台對應的 assets。Release 必須允許上傳／替換 assets；此工作流程不會啟用不可變 release。ARM 目標指的是 64 位元 ARM，而非 32 位元 ARMv7。

@@ -8,7 +8,7 @@
 
 ## Binaries and User Interface
 
-The project must provide two binaries available on the user's `PATH`:
+The project must provide three binaries available on the user's `PATH`:
 
 ### `git-gdrive`
 
@@ -36,6 +36,14 @@ Preserve the specified `git-remote-drive` credential directory name, which diffe
 - Supports fetching and pushing repository history as implementation progresses. Adding a remote only configures its URL; actual Drive access happens during operations such as clone, fetch, and push.
 - Reports missing or unusable credentials with an actionable instruction to run `git gdrive config`.
 
+### `git-remote-gdrive-local`
+
+- Implements the same remote-helper protocol for `gdrive-local:///absolute/path` without OAuth or Drive API access.
+- Uses the portable format in `docs/storage-local.md`, with content-addressed objects and a file-based CURRENT pointer. The entire root must remain usable after copying to another path or computer.
+- Reuses Git validation, packs, optional assets, progress, and ref-before-ZIP publication. Only user-selected URLs may supply local asset paths.
+- Serialize local writes and compare expected versions before publication. Locks cannot protect independently synced copies; document the single-writer handoff requirement.
+- Include the helper in Makefile builds and every release platform package.
+
 ## Protocol and Storage Design
 
 - Follow the official [gitremote-helpers documentation](https://git-scm.com/docs/gitremote-helpers) for invocation, capability negotiation, command parsing, and responses.
@@ -45,7 +53,7 @@ Preserve the specified `git-remote-drive` credential directory name, which diffe
 - Handle protocol line boundaries, command batches, and end-of-input correctly.
 - Validate `gdrive://{folder_id}` URLs before issuing Drive requests.
 - Keep command entry points small and separate authentication, credential persistence, remote-helper protocol handling, and Drive storage concerns into reusable Go packages.
-- Preserve the storage contract in `docs/storage.md`: PUBLIC root properties identify the canonical `@.git-remote-gdrive` directory and immutable manifest; never identify repositories by file names alone.
+- For the API backend, preserve `docs/storage.md`: PUBLIC root properties identify the canonical storage directory and immutable manifest; never identify repositories by file names alone. The local backend uses its explicit FORMAT marker and CURRENT file and rejects API-format directories.
 - Publish new refs only after successful object and manifest uploads, using the expected manifest version and a conditional root metadata update. Never replace this with an unconditional write, even for force pushes.
 - Keep the active incremental pack chain bounded. Retain previous snapshots and packs until a separate, safe garbage-collection design is implemented.
 - Optional gdrive-assets use canonical SHA-256 pointers and a verified cache in the Git common directory. Upload all missing assets reachable through pushed history before publishing refs, and retain the complete asset index. Asset failures fail the push before ref publication. Repositories with assets require manifest v2 so older helpers reject them; repositories without assets remain v1. Checkout downloads are lazy and must verify size and SHA-256 before emitting bytes. See `docs/assets.md`.

@@ -1,5 +1,9 @@
 # Optional gdrive-assets
 
+These filters also work with `gdrive-local://` remotes without OAuth. Local asset
+objects travel with the complete remote folder and are verified during checkout.
+See [local storage](storage-local.md) for portability and sync requirements.
+
 `git gdrive install` registers clean/smudge filters in the current repository's
 Git config. `--global` registers them in user config, including before cloning.
 Installation needs neither credentials nor a network connection and does not

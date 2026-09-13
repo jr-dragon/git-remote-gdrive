@@ -16,6 +16,7 @@ import (
 	"github.com/jr-dragon/git-remote-gdrive/internal/assets"
 	"github.com/jr-dragon/git-remote-gdrive/internal/drive"
 	"github.com/jr-dragon/git-remote-gdrive/internal/googleauth"
+	"github.com/jr-dragon/git-remote-gdrive/internal/localstore"
 	"github.com/jr-dragon/git-remote-gdrive/internal/progress"
 	"github.com/jr-dragon/git-remote-gdrive/internal/repository"
 )
@@ -23,6 +24,13 @@ import (
 type OpenStore func(context.Context, string) (repository.Store, error)
 
 func authenticatedStore(ctx context.Context, root string) (repository.Store, error) {
+	if strings.HasPrefix(root, "gdrive-local://") {
+		path, err := localstore.Path(root)
+		if err != nil {
+			return nil, err
+		}
+		return localstore.New(path)
+	}
 	path, err := googleauth.DefaultPath()
 	if err != nil {
 		return nil, err
@@ -223,6 +231,14 @@ func (r *Resolver) roots(ctx context.Context, cache assets.Cache) ([]string, err
 		}
 	}
 	for _, raw := range urls {
+		if path, err := localstore.Path(raw); err == nil {
+			canonical := localstore.URL(path)
+			if !seen[canonical] {
+				roots = append(roots, canonical)
+				seen[canonical] = true
+			}
+			continue
+		}
 		u, err := url.Parse(raw)
 		if err == nil && u.Scheme == "gdrive" && u.User == nil && u.Path == "" && u.RawQuery == "" && !u.ForceQuery && u.Fragment == "" {
 			add(u.Host)
@@ -235,6 +251,26 @@ func (r *Resolver) roots(ctx context.Context, cache assets.Cache) ([]string, err
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			add(entry.Name())
+		}
+	}
+	entries, err = os.ReadDir(filepath.Join(cache.Dir, "local-remotes"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(cache.Dir, "local-remotes", entry.Name()))
+		if err != nil {
+			return nil, err
+		}
+		if path, err := localstore.Path(string(data)); err == nil {
+			canonical := localstore.URL(path)
+			if !seen[canonical] {
+				roots = append(roots, canonical)
+				seen[canonical] = true
+			}
 		}
 	}
 	return roots, nil

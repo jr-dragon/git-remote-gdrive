@@ -209,8 +209,16 @@ func (h *Helper) fetch(ctx context.Context, batch []string) error {
 	if err := g.Hydrate(ctx, h.store, h.manifest); err != nil {
 		return err
 	}
-	if err := g.RememberAssetRemote(ctx, h.manifest); err != nil {
-		return err
+	if local, ok := h.store.(interface{ AssetRemoteURL() string }); ok {
+		if len(h.manifest.Assets) > 0 {
+			if err := g.RememberLocalAssetRemote(ctx, local.AssetRemoteURL()); err != nil {
+				return err
+			}
+		}
+	} else {
+		if err := g.RememberAssetRemote(ctx, h.manifest); err != nil {
+			return err
+		}
 	}
 	progress.Step(ctx, "Fetch complete")
 	return nil

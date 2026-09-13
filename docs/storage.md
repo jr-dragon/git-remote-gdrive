@@ -1,5 +1,8 @@
 # Drive repository formats v1 and v2
 
+This describes the API backend. The portable `gdrive-local://` backend is specified
+in [local storage](storage-local.md).
+
 ## Discovery and identity
 
 The URL is exactly `gdrive://<folder-id>`. The selected folder is the repository

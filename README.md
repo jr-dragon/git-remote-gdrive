@@ -6,19 +6,67 @@
 
 Use Google Drive as a Git remote through `gdrive://{folder_id}`. The project
 provides browser OAuth authentication and a remote helper for clone, fetch, and push.
+Use `gdrive-local:///absolute/path` for a folder remote without OAuth or Drive API
+access, then transfer that folder yourself or with Drive for desktop.
 
 ## Install
 
 With the Go version specified in `go.mod`:
 
 ```sh
-go install ./git-gdrive ./git-remote-gdrive
+go install ./git-gdrive ./git-remote-gdrive ./git-remote-gdrive-local
 ```
 
 Add your Go binary installation directory to `PATH`. Alternatively, run `make build`
-and add the resulting `build/` directory to `PATH`. Both binaries and Git itself
-must be available (Git 2.36 or later): `git-gdrive` supplies `git gdrive`, while Git invokes
-`git-remote-gdrive` automatically for `gdrive://` URLs.
+and add the resulting `build/` directory to `PATH`. Git 2.36 or later is required.
+`git-gdrive` supplies `git gdrive`; Git invokes `git-remote-gdrive` for `gdrive://`
+and `git-remote-gdrive-local` for `gdrive-local://`. Local mode needs no credentials.
+
+## Local folder remote (no Drive API)
+
+Create a dedicated folder outside your Git working tree and use its absolute path:
+
+```sh
+mkdir -p /absolute/path/Drive/project-remote
+git remote add origin 'gdrive-local:///absolute/path/Drive/project-remote'
+git push -u origin main
+git push origin --tags
+```
+
+Windows uses `gdrive-local:///C:/Users/me/Drive/project-remote`. Quote URLs with
+spaces; encode literal `%`, `#`, and `?` as `%25`, `%23`, and `%3F`. Relative and
+UNC paths are unsupported. Use `git remote set-url origin <local-url>` to change
+an existing remote.
+
+After push finishes, upload/copy the **entire root**, including
+`@.git-remote-gdrive/`. Another user downloads the complete folder and runs:
+
+```sh
+git clone 'gdrive-local:///absolute/path/downloaded/project-remote' project
+cd project
+# Develop and commit, then:
+git push origin main
+```
+
+The portable folder includes packs, refs/HEAD/tags, manifests, and optional assets.
+ZIPs are written to `branches/` and `tags/` after refs commit. Assets use the same
+optional `git gdrive install` and `.gitattributes` setup. For asset checkout during
+clone, install filters with `git gdrive install --global` beforehand, or clone with
+`--no-checkout`, install locally, then check out the branch.
+
+Coordinate **one writer at a time across computers**. Finish downloading before
+fetch/pull; finish uploading after push before handing the folder to the next
+writer. Make the folder available offline with Drive for desktop. Locks and version
+checks protect processes sharing the same local filesystem, not independently
+synced copies. If `CURRENT` has a sync conflict, preserve both copies and reconcile
+their Git histories before publishing a complete replacement. Missing pointers or
+objects cause errors; the helper never selects an older manifest automatically.
+
+This format differs from the API backend's Drive IDs/custom properties. Uploading
+a local remote does **not** make it readable via `gdrive://`, and downloading an
+API remote does not convert it. Migrate from a Git checkout with the required
+history/assets available: add a fresh destination remote and push the desired
+branches and tags. See [local storage format](docs/storage-local.md).
 
 ## Google OAuth setup
 
@@ -335,7 +383,7 @@ The **Testing** workflow runs `go test -race ./...` and `go vet ./...` on every
 push to `main`. Both workflows use the Go version declared in `go.mod`.
 
 Publishing a GitHub Release (including a prerelease) triggers **Build** for its
-tag. It cross-compiles both executables with CGO disabled for these targets:
+tag. It cross-compiles all three executables with CGO disabled for these targets:
 
 | Platform | Release archive |
 | --- | --- |
@@ -345,7 +393,7 @@ tag. It cross-compiles both executables with CGO disabled for these targets:
 | Windows x86_64 | `git-remote-gdrive-windows-x86_64.zip` |
 | Windows ARM64 | `git-remote-gdrive-windows-arm64.zip` |
 
-Each archive contains `git-gdrive`, `git-remote-gdrive` (with `.exe` on Windows),
+Each archive contains `git-gdrive`, `git-remote-gdrive`, and `git-remote-gdrive-local` (with `.exe` on Windows),
 LICENSE, and README. The workflow attaches the archive and its `.sha256` checksum
 to the triggering release using the built-in `GITHUB_TOKEN`; no additional secret
 is required. Rerunning a build replaces that platform's matching assets. Releases
